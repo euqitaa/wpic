@@ -1,66 +1,115 @@
-# Minimal Image Viewer for Windows
+# wpic
 
-A lightweight, native Windows image viewer built with pure Win32 API and GDI+. No Qt, no heavy frameworks, no bloat.
+A minimal, lightweight image viewer for Windows. Built with pure Win32 API and GDI+ - no Qt, no .NET, no bloat.
+
+![wpic Icon](wpic.png)
 
 ## Features
 
 - **Minimal footprint**: ~50KB executable, ~5-10MB RAM usage
 - **Fast loading**: Native Win32 + GDI+ rendering
+- **Clean UI**: Standard Windows title bar with bottom toolbar
 - **Folder navigation**: Auto-scans folder for images
 - **Keyboard shortcuts**:
   - `←` / `→` or `Space` / `Backspace` - Navigate images
   - `↑` / `↓` - Zoom in/out
   - `F` - Toggle fit-to-window
-  - `R` - Reset view
-  - `D` - Toggle dark/light mode
+  - `R` - Reset rotation
+  - `Delete` - Move to Recycle Bin (with confirmation)
   - `Esc` - Exit
 - **Mouse controls**:
   - Scroll wheel - Zoom
   - Drag - Pan when zoomed
   - Drag & drop - Open image
 - **Supported formats**: JPG, PNG, GIF, BMP, TIFF, WebP
+- **Safe delete**: Files moved to Recycle Bin with confirmation dialog
+- **Image rotation**: Rotate left/right without distortion
+
+## Screenshots
+
+### Main Interface
+Standard Windows title bar with centered toolbar at bottom:
+```
+[◄ Previous] [► Next] | [⊖ Zoom out] [⊕ Zoom in] [□ Fit] [1:1 Actual] | [↺ Rotate left] [↻ Rotate right] | [✕ Delete]
+```
 
 ## Building
 
-### Option 1: Visual Studio (Recommended)
+### Prerequisites
+
+- **MinGW-w64** (recommended) or **Visual Studio Build Tools**
+- Your icon file: `wpic.ico` (convert the provided PNG to ICO format)
+
+### Build Steps
+
+1. **Convert icon** (if you have PNG):
+   - Use any online PNG to ICO converter
+   - Recommended size: 256x256 with 32x32 and 16x16 versions included
+   - Save as `wpic.ico`
+
+2. **Compile resource file**:
+   ```bash
+   windres wpic.rc -o wpic_res.o
+   ```
+
+3. **Build executable**:
+   ```bash
+   g++ -O2 -s wpic.cpp wpic_res.o -o wpic.exe -municode -lgdiplus -luser32 -lgdi32 -lshell32 -mwindows
+   ```
+
+### MSVC Alternative
+
 ```cmd
-cl.exe minimal_viewer.cpp /O2 /EHsc /Fe:minimal_viewer.exe /link gdiplus.lib user32.lib gdi32.lib shell32.lib
+rc.exe wpic.rc
+cl.exe wpic.cpp /O2 /Fe:wpic.exe /link wpic.res gdiplus.lib user32.lib gdi32.lib shell32.lib
 ```
 
-### Option 2: MinGW
-```cmd
-g++ -O2 -s minimal_viewer.cpp -o minimal_viewer.exe -lgdiplus -luser32 -lgdi32 -lshell32 -mwindows
-```
+## Installation
 
-### Option 3: Run build.bat
-Double-click `build.bat` - it auto-detects your compiler.
+Simply place `wpic.exe` anywhere you want. It's a portable single-file application.
+
+Optional: Set as default image viewer:
+1. Right-click an image file → Open with → Choose another app
+2. Browse to `wpic.exe`
+3. Check "Always use this app to open .jpg files" (repeat for other formats)
 
 ## Usage
 
 ```cmd
-minimal_viewer.exe [image_path]
+wpic.exe [image_path]
 ```
 
 Or drag and drop an image onto the window.
 
-## Why This?
+## Why wpic?
 
-| Feature | Microsoft Photos | This Viewer |
-|---------|-----------------|-------------|
+| Feature | Microsoft Photos | wpic |
+|---------|-----------------|------|
 | Startup Time | Slow (UWP) | Instant |
 | RAM Usage | ~100-200MB | ~5-10MB |
 | File Size | ~50MB+ | ~50KB |
 | Dependencies | Windows Store, UWP | Windows only |
 | Network Calls | Yes (OneDrive) | No |
 | Telemetry | Yes | No |
+| Delete Safety | Permanent | Recycle Bin |
 
 ## Architecture
 
-- **No frameworks**: Pure Win32 API
-- **No runtime dependencies**: Uses only Windows system libraries (gdiplus.dll, user32.dll, gdi32.dll)
-- **Static linking**: All code in single executable
-- **Memory efficient**: Loads only current image, streams from disk
+- **No frameworks**: Pure Win32 API + GDI+
+- **No runtime dependencies**: Uses only Windows system libraries
+- **Static linking**: Single executable file
+- **Memory efficient**: Loads only current image
+
+## Files
+
+- `wpic.cpp` - Main source code
+- `wpic.rc` - Resource file (icon + version info)
+- `wpic.ico` - Application icon (you provide this)
 
 ## License
 
 Public Domain - Do whatever you want.
+
+---
+
+**Icon**: Custom "W" logo with mountain landscape and crescent moon
