@@ -1,6 +1,6 @@
 # wpic
 
-A minimal, lightweight image viewer for Windows. Built with pure Win32 API and GDI+ - no Qt, no .NET, no bloat.
+A minimal, lightweight image viewer for Windows. Built with pure Win32 API and GDI+ - no bloat.
 
 ![wpic Icon](wpic.png)
 
@@ -26,7 +26,7 @@ A minimal, lightweight image viewer for Windows. Built with pure Win32 API and G
 - **Image rotation**: Rotate left/right without distortion
 
 ## Screenshots
-
+![Screenshot](Screenshot.png)
 ### Main Interface
 Standard Windows title bar with centered toolbar at bottom:
 ```
@@ -108,7 +108,3 @@ Or drag and drop an image onto the window.
 ## License
 
 Public Domain - Do whatever you want.
-
----
-
-**Icon**: Custom "W" logo with mountain landscape and crescent moon
