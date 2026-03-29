@@ -24,6 +24,10 @@
 
 using namespace Gdiplus;
 
+// Menu IDs
+#define IDM_OPTIONS_DARKMODE 2001
+#define IDM_OPTIONS_ABOUT 2002
+
 // Toolbar constants
 #define TOOLBAR_HEIGHT 60
 #define BUTTON_HEIGHT 46
@@ -51,6 +55,7 @@ struct ButtonDef {
 // Global state
 HWND g_hwnd = nullptr;
 HWND g_hToolbar = nullptr;
+HMENU g_hMenu = nullptr;
 std::vector<std::wstring> g_imageFiles;
 std::wstring g_currentFolder;
 size_t g_currentIndex = 0;
@@ -60,7 +65,8 @@ bool g_fitToWindow = true;
 POINT g_panOffset = {0, 0};
 bool g_isPanning = false;
 POINT g_lastMousePos = {0, 0};
-int g_rotation = 0; // 0, 90, 180, 270 degrees
+int g_rotation = 0;
+bool g_darkMode = false;
 
 // Supported extensions
 const wchar_t* g_supportedExts[] = {L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".tiff", L".tif", L".webp", nullptr};
@@ -184,11 +190,26 @@ void RotateRight() {
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
+void ToggleDarkMode() {
+    g_darkMode = !g_darkMode;
+
+    // Update menu checkmark
+    if (g_hMenu) {
+        HMENU hOptionsMenu = GetSubMenu(g_hMenu, 0);
+        if (hOptionsMenu) {
+            CheckMenuItem(hOptionsMenu, IDM_OPTIONS_DARKMODE, 
+                g_darkMode ? MF_CHECKED : MF_UNCHECKED);
+        }
+    }
+
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+    if (g_hToolbar) InvalidateRect(g_hToolbar, nullptr, FALSE);
+}
+
 void DeleteToRecycleBin(const std::wstring& filePath) {
     SHFILEOPSTRUCTW fileOp = {};
     fileOp.wFunc = FO_DELETE;
 
-    // Need double-null terminated string
     wchar_t* from = new wchar_t[filePath.length() + 2];
     wcscpy(from, filePath.c_str());
     from[filePath.length() + 1] = L'\0';
@@ -206,16 +227,13 @@ void DeleteCurrentImage() {
     std::wstring currentFile = g_imageFiles[g_currentIndex];
     std::wstring filename = currentFile.substr(currentFile.find_last_of(L'\\') + 1);
 
-    // Confirmation dialog
     std::wstring msg = L"Are you sure you want to move this file to the Recycle Bin?\n\n" + filename;
     int result = MessageBoxW(g_hwnd, msg.c_str(), L"wpic - Confirm Delete", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
 
     if (result != IDYES) return;
 
-    // Move to next image first
     size_t nextIndex = (g_currentIndex + 1) % g_imageFiles.size();
     if (nextIndex == g_currentIndex && g_imageFiles.size() == 1) {
-        // Last image
         if (g_currentImage) {
             delete g_currentImage;
             g_currentImage = nullptr;
@@ -227,7 +245,6 @@ void DeleteCurrentImage() {
         return;
     }
 
-    // Load next image, then delete current
     LoadImage(nextIndex);
     DeleteToRecycleBin(currentFile);
     g_imageFiles.erase(g_imageFiles.begin() + g_currentIndex);
@@ -235,11 +252,109 @@ void DeleteCurrentImage() {
     UpdateTitle();
 }
 
+// About dialog window procedure
+LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            // Set dark background if in dark mode
+            if (g_darkMode) {
+                SetWindowLongW(hwnd, GWL_EXSTYLE, GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_COMPOSITED);
+            }
+
+            // Title
+            HWND hTitle = CreateWindowExW(0, L"STATIC", L"wpic",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                0, 20, 400, 40, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hTitle, WM_SETFONT, (WPARAM)CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+
+            // Version
+            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.5",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                0, 65, 400, 25, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hVersion, WM_SETFONT, (WPARAM)CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+
+            // Author
+            HWND hAuthor = CreateWindowExW(0, L"STATIC", L"by euqitaa",
+                WS_CHILD | WS_VISIBLE | SS_CENTER,
+                0, 95, 400, 25, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hAuthor, WM_SETFONT, (WPARAM)CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+
+            // GitHub link
+            HWND hLink = CreateWindowExW(0, L"STATIC", L"https://github.com/euqitaa/wpic",
+                WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,
+                50, 140, 300, 30, hwnd, (HMENU)1001, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hLink, WM_SETFONT, (WPARAM)CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+
+            return 0;
+        }
+
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+
+        case WM_DESTROY:
+            EnableWindow(g_hwnd, TRUE);
+            SetForegroundWindow(g_hwnd);
+            return 0;
+
+        case WM_COMMAND:
+            if (LOWORD(wParam) == 1001) { // Link clicked
+                ShellExecuteW(nullptr, L"open", L"https://github.com/euqitaa/wpic", nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            return 0;
+
+        case WM_CTLCOLORDLG:
+        case WM_CTLCOLORSTATIC:
+            if (g_darkMode) {
+                HDC hdc = (HDC)wParam;
+                SetBkColor(hdc, RGB(45, 45, 45));
+                SetTextColor(hdc, RGB(255, 255, 255));
+                return (LRESULT)CreateSolidBrush(RGB(45, 45, 45));
+            }
+            break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+// Custom About dialog
+void ShowAboutDialog() {
+    // Register dialog class
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = AboutDlgProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"wpicAboutDlg";
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    RegisterClassExW(&wc);
+
+    // Create dialog window
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        L"wpicAboutDlg", L"About wpic",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 400, 220,
+        g_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
+    );
+
+    if (!hDlg) return;
+
+    // Center dialog
+    RECT rcDlg, rcOwner;
+    GetWindowRect(hDlg, &rcDlg);
+    GetWindowRect(g_hwnd, &rcOwner);
+    int x = rcOwner.left + (rcOwner.right - rcOwner.left - (rcDlg.right - rcDlg.left)) / 2;
+    int y = rcOwner.top + (rcOwner.bottom - rcOwner.top - (rcDlg.bottom - rcDlg.top)) / 2;
+    SetWindowPos(hDlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
+
+    // Disable parent window
+    EnableWindow(g_hwnd, FALSE);
+}
+
 // Calculate button layout
 void GetButtonLayout(int windowWidth, ButtonDef* buttons, int& count) {
     count = 9;
 
-    // Wider buttons for larger text
     buttons[0] = {ID_BTN_PREV, L"◄", L"Previous", 0, 80};
     buttons[1] = {ID_BTN_NEXT, L"►", L"Next", 0, 60};
     buttons[2] = {ID_BTN_ZOOM_OUT, L"⊖", L"Zoom out", 0, 80};
@@ -250,23 +365,20 @@ void GetButtonLayout(int windowWidth, ButtonDef* buttons, int& count) {
     buttons[7] = {ID_BTN_ROTATE_RIGHT, L"↻", L"Rotate right", 0, 95};
     buttons[8] = {ID_BTN_DELETE, L"✕", L"Delete", 0, 65};
 
-    // Calculate total width needed
-    int totalWidth = 10; // Left margin
+    int totalWidth = 10;
     for (int i = 0; i < count; i++) {
-        totalWidth += buttons[i].width + 4; // +4 for spacing
-        if (i == 1 || i == 5 || i == 7) totalWidth += 20; // Separators
+        totalWidth += buttons[i].width + 4;
+        if (i == 1 || i == 5 || i == 7) totalWidth += 20;
     }
 
-    // Center the toolbar
     int startX = (windowWidth - totalWidth) / 2;
     if (startX < 10) startX = 10;
 
-    // Assign X positions
     int x = startX;
     for (int i = 0; i < count; i++) {
         buttons[i].x = x;
         x += buttons[i].width + 4;
-        if (i == 1 || i == 5 || i == 7) x += 20; // Add separator space
+        if (i == 1 || i == 5 || i == 7) x += 20;
     }
 }
 
@@ -292,48 +404,52 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RECT rc;
             GetClientRect(hwnd, &rc);
 
-            // Background
-            HBRUSH bgBrush = CreateSolidBrush(RGB(245, 245, 245));
+            // Background - dark or light
+            COLORREF bgColor = g_darkMode ? RGB(45, 45, 45) : RGB(245, 245, 245);
+            HBRUSH bgBrush = CreateSolidBrush(bgColor);
             FillRect(hdc, &rc, bgBrush);
             DeleteObject(bgBrush);
 
             // Top border
-            HPEN pen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+            COLORREF borderColor = g_darkMode ? RGB(80, 80, 80) : RGB(200, 200, 200);
+            HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
             HPEN oldPen = (HPEN)SelectObject(hdc, pen);
             MoveToEx(hdc, 0, 0, nullptr);
             LineTo(hdc, rc.right, 0);
             SelectObject(hdc, oldPen);
             DeleteObject(pen);
 
-            // Recalculate layout if needed
             RECT parentRc;
             GetClientRect(GetParent(hwnd), &parentRc);
             GetButtonLayout(parentRc.right, buttons, btnCount);
 
-            // Get mouse position for hover effect
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
 
-            // Draw buttons
+            // Text colors
+            COLORREF textColor = g_darkMode ? RGB(220, 220, 220) : RGB(60, 60, 60);
+            COLORREF labelColor = g_darkMode ? RGB(180, 180, 180) : RGB(80, 80, 80);
+
             for (int i = 0; i < btnCount; i++) {
                 RECT btnRc = {buttons[i].x, 8, buttons[i].x + buttons[i].width, 8 + BUTTON_HEIGHT};
                 bool hovered = (pt.x >= btnRc.left && pt.x < btnRc.right && pt.y >= btnRc.top && pt.y < btnRc.bottom);
                 bool pressed = (pressedBtn == buttons[i].id);
 
                 // Button background
-                COLORREF bgColor;
-                if (pressed) bgColor = RGB(200, 200, 200);
-                else if (hovered) bgColor = RGB(230, 230, 230);
-                else bgColor = RGB(245, 245, 245);
+                COLORREF btnBgColor;
+                if (pressed) btnBgColor = g_darkMode ? RGB(70, 70, 70) : RGB(200, 200, 200);
+                else if (hovered) btnBgColor = g_darkMode ? RGB(60, 60, 60) : RGB(230, 230, 230);
+                else btnBgColor = bgColor;
 
-                HBRUSH brush = CreateSolidBrush(bgColor);
+                HBRUSH brush = CreateSolidBrush(btnBgColor);
                 FillRect(hdc, &btnRc, brush);
                 DeleteObject(brush);
 
                 // Border
                 if (hovered || pressed) {
-                    HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(180, 180, 180));
+                    COLORREF btnBorderColor = g_darkMode ? RGB(100, 100, 100) : RGB(180, 180, 180);
+                    HPEN borderPen = CreatePen(PS_SOLID, 1, btnBorderColor);
                     HPEN oldBorderPen = (HPEN)SelectObject(hdc, borderPen);
                     HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
                     Rectangle(hdc, btnRc.left, btnRc.top, btnRc.right, btnRc.bottom);
@@ -342,10 +458,11 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     DeleteObject(borderPen);
                 }
 
-                // Draw separator after certain buttons
+                // Separator
                 if (i == 1 || i == 5 || i == 7) {
                     int sepX = btnRc.right + 10;
-                    HPEN sepPen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+                    COLORREF sepPenColor = g_darkMode ? RGB(80, 80, 80) : RGB(200, 200, 200);
+                    HPEN sepPen = CreatePen(PS_SOLID, 1, sepPenColor);
                     HPEN oldSepPen = (HPEN)SelectObject(hdc, sepPen);
                     MoveToEx(hdc, sepX, 14, nullptr);
                     LineTo(hdc, sepX, TOOLBAR_HEIGHT - 14);
@@ -353,9 +470,9 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     DeleteObject(sepPen);
                 }
 
-                // Draw symbol (larger, centered)
+                // Symbol
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(60, 60, 60));
+                SetTextColor(hdc, textColor);
                 HFONT symbolFont = CreateFontW(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
                 HFONT oldFont = (HFONT)SelectObject(hdc, symbolFont);
 
@@ -365,8 +482,8 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SelectObject(hdc, oldFont);
                 DeleteObject(symbolFont);
 
-                // Draw label (larger, below symbol)
-                SetTextColor(hdc, RGB(80, 80, 80));
+                // Label
+                SetTextColor(hdc, labelColor);
                 HFONT labelFont = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
                 oldFont = (HFONT)SelectObject(hdc, labelFont);
 
@@ -451,7 +568,8 @@ void Render(HWND hwnd) {
     HBITMAP memBitmap = CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
 
-    Color bgColor(240, 240, 240);
+    // Dark or light background
+    Color bgColor = g_darkMode ? Color(30, 30, 30) : Color(240, 240, 240);
     Graphics graphics(memDC);
     graphics.Clear(bgColor);
 
@@ -459,7 +577,6 @@ void Render(HWND hwnd) {
         int imgWidth = g_currentImage->GetWidth();
         int imgHeight = g_currentImage->GetHeight();
 
-        // Handle rotation - swap dimensions when rotated 90 or 270 degrees
         bool rotated90 = (g_rotation == 90 || g_rotation == 270);
         int renderWidth = rotated90 ? imgHeight : imgWidth;
         int renderHeight = rotated90 ? imgWidth : imgHeight;
@@ -484,14 +601,12 @@ void Render(HWND hwnd) {
         graphics.SetSmoothingMode(SmoothingModeHighQuality);
         graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 
-        // Apply rotation transform around center
         REAL centerX = x + drawWidth / 2;
         REAL centerY = y + drawHeight / 2;
         graphics.TranslateTransform(centerX, centerY);
         graphics.RotateTransform((REAL)g_rotation);
         graphics.TranslateTransform(-centerX, -centerY);
 
-        // Draw image - use original dimensions for source, calculated for dest
         RectF destRect(centerX - (imgWidth * (drawWidth / renderWidth)) / 2, 
                        centerY - (imgHeight * (drawHeight / renderHeight)) / 2,
                        imgWidth * (drawWidth / renderWidth), 
@@ -499,7 +614,7 @@ void Render(HWND hwnd) {
         graphics.DrawImage(g_currentImage, destRect);
     } else {
         SetBkMode(memDC, TRANSPARENT);
-        SetTextColor(memDC, RGB(100, 100, 100));
+        SetTextColor(memDC, g_darkMode ? RGB(200, 200, 200) : RGB(100, 100, 100));
         HFONT font = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT oldFont = (HFONT)SelectObject(memDC, font);
         std::wstring msg = g_imageFiles.empty() ? L"Drag and drop an image here" : L"Failed to load image";
@@ -521,6 +636,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             DragAcceptFiles(hwnd, TRUE);
+
+            // Create menu bar
+            g_hMenu = CreateMenu();
+            HMENU hOptionsMenu = CreatePopupMenu();
+
+            AppendMenuW(hOptionsMenu, MF_STRING | MF_UNCHECKED, IDM_OPTIONS_DARKMODE, L"Dark Mode\tCtrl+D");
+            AppendMenuW(hOptionsMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hOptionsMenu, MF_STRING, IDM_OPTIONS_ABOUT, L"About");
+
+            AppendMenuW(g_hMenu, MF_POPUP, (UINT_PTR)hOptionsMenu, L"Options");
+            SetMenu(hwnd, g_hMenu);
 
             // Register toolbar class
             WNDCLASSEXW wc = {};
@@ -582,6 +708,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case ID_BTN_ROTATE_LEFT: RotateLeft(); break;
                 case ID_BTN_ROTATE_RIGHT: RotateRight(); break;
                 case ID_BTN_DELETE: DeleteCurrentImage(); break;
+                case IDM_OPTIONS_DARKMODE: ToggleDarkMode(); break;
+                case IDM_OPTIONS_ABOUT: ShowAboutDialog(); break;
             }
             return 0;
         }
@@ -628,12 +756,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case VK_DOWN: ZoomOut(); break;
                 case 'F': ToggleZoom(); break;
                 case 'R': g_rotation = 0; InvalidateRect(hwnd, nullptr, FALSE); break;
+                case 'D': 
+                    if (GetAsyncKeyState(VK_CONTROL) < 0) {
+                        ToggleDarkMode();
+                    }
+                    break;
                 case VK_DELETE: DeleteCurrentImage(); break;
                 case VK_ESCAPE: PostQuitMessage(0); break;
             }
             return 0;
 
         case WM_DESTROY:
+            if (g_hMenu) DestroyMenu(g_hMenu);
             PostQuitMessage(0);
             return 0;
     }
@@ -645,10 +779,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     ULONG_PTR gdiplusToken;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
-    // Load the application icon from resource
+    // Load icon
     HICON hIcon = LoadIconW(hInstance, L"IDI_APPLICATION");
-    if (!hIcon) hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101)); // Try default ID
-    if (!hIcon) hIcon = LoadIconW(nullptr, IDI_APPLICATION); // Fallback
+    if (!hIcon) hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
+    if (!hIcon) hIcon = LoadIconW(nullptr, IDI_APPLICATION);
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
