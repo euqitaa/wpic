@@ -1,0 +1,22 @@
+# Compiled Binaries
+*.exe
+*.out
+*.app
+
+# Intermediate Build Files (Object files)
+*.o
+*.obj
+
+# IDE & Build System Folders (Common for Windows/Visual Studio/VS Code)
+.vscode/
+bin/
+obj/
+out/
+build/
+x64/
+Debug/
+Release/
+
+# System Files
+Thumbs.db
+Desktop.ini
