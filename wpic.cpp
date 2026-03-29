@@ -645,6 +645,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     ULONG_PTR gdiplusToken;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
+    // Load the application icon from resource
+    HICON hIcon = LoadIconW(hInstance, L"IDI_APPLICATION");
+    if (!hIcon) hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101)); // Try default ID
+    if (!hIcon) hIcon = LoadIconW(nullptr, IDI_APPLICATION); // Fallback
+
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = WndProc;
@@ -652,8 +657,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     wc.lpszClassName = L"wpicWindowClass";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = hIcon;
+    wc.hIconSm = hIcon;
     RegisterClassExW(&wc);
 
     g_hwnd = CreateWindowExW(
