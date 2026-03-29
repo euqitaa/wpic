@@ -91,7 +91,6 @@ Or drag and drop an image onto the window.
 | Dependencies | Windows Store, UWP | Windows only |
 | Network Calls | Yes (OneDrive) | No |
 | Telemetry | Yes | No |
-| Delete Safety | Permanent | Recycle Bin |
 
 ## Architecture
 
