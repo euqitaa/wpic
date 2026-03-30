@@ -1,5 +1,5 @@
 // wpic - Minimal Image Viewer for Windows
-// Build: g++ -O2 -s wpic.cpp -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32
+// Build: g++ -O2 -s wpic.cpp -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32 -fexceptions
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -42,6 +42,9 @@ using namespace Gdiplus;
 #define ID_BTN_ROTATE_RIGHT 1008
 #define ID_BTN_DELETE 1009
 
+// Cache constants
+#define CACHE_SIZE 3  // Number of images to cache ahead and behind
+
 // Button layout
 struct ButtonDef {
     int id;
@@ -49,6 +52,57 @@ struct ButtonDef {
     const wchar_t* label;
     int x;
     int width;
+};
+
+// Cached image entry
+struct CachedImage {
+    std::wstring path;
+    Image* image;
+    volatile bool loading;
+    volatile bool ready;
+    
+    CachedImage() : image(nullptr), loading(false), ready(false) {}
+    
+    // Disable copy
+    CachedImage(const CachedImage&) = delete;
+    CachedImage& operator=(const CachedImage&) = delete;
+    
+    // Enable move
+    CachedImage(CachedImage&& other) noexcept 
+        : path(std::move(other.path)), 
+          image(other.image),
+          loading(other.loading),
+          ready(other.ready) {
+        other.image = nullptr;
+        other.loading = false;
+        other.ready = false;
+    }
+    
+    CachedImage& operator=(CachedImage&& other) noexcept {
+        if (this != &other) {
+            if (image) delete image;
+            path = std::move(other.path);
+            image = other.image;
+            loading = other.loading;
+            ready = other.ready;
+            other.image = nullptr;
+            other.loading = false;
+            other.ready = false;
+        }
+        return *this;
+    }
+    
+    ~CachedImage() { if (image) delete image; }
+    
+    void clear() {
+        if (image) {
+            delete image;
+            image = nullptr;
+        }
+        loading = false;
+        ready = false;
+        path.clear();
+    }
 };
 
 // Global state
@@ -66,6 +120,14 @@ bool g_isPanning = false;
 POINT g_lastMousePos = {0, 0};
 int g_rotation = 0;
 bool g_darkMode = false;
+
+// Cache state
+std::vector<CachedImage> g_imageCache;
+CRITICAL_SECTION g_cacheLock;
+HANDLE g_cacheThread = nullptr;
+volatile bool g_cacheRunning = false;
+volatile size_t g_cacheTargetIndex = 0;
+volatile bool g_cacheReady = false;  // Set to true when image list is ready
 
 // Supported extensions
 const wchar_t* g_supportedExts[] = {L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".tiff", L".tif", L".webp", nullptr};
@@ -105,12 +167,200 @@ void ScanFolder(const std::wstring& targetFile) {
 
     std::sort(g_imageFiles.begin(), g_imageFiles.end());
 
+    // Find the target file index - case insensitive comparison
+    g_currentIndex = 0;
+    std::wstring targetLower = targetFile;
+    std::transform(targetLower.begin(), targetLower.end(), targetLower.begin(), [](wchar_t c){ return std::towlower(c); });
+    
     for (size_t i = 0; i < g_imageFiles.size(); ++i) {
-        if (g_imageFiles[i] == targetFile) {
+        std::wstring fileLower = g_imageFiles[i];
+        std::transform(fileLower.begin(), fileLower.end(), fileLower.begin(), [](wchar_t c){ return std::towlower(c); });
+        if (fileLower == targetLower) {
             g_currentIndex = i;
             break;
         }
     }
+}
+
+void StopCacheThread() {
+    g_cacheRunning = false;
+    g_cacheReady = false;
+    if (g_cacheThread) {
+        WaitForSingleObject(g_cacheThread, 2000);
+        CloseHandle(g_cacheThread);
+        g_cacheThread = nullptr;
+    }
+}
+
+DWORD WINAPI CacheWorker(LPVOID lpParam);
+
+void StartCacheThread() {
+    StopCacheThread();
+    g_cacheRunning = true;
+    g_cacheReady = false;
+    g_cacheThread = CreateThread(nullptr, 0, CacheWorker, nullptr, 0, nullptr);
+}
+
+void WakeCacheThread() {
+    g_cacheReady = true;
+}
+
+Image* GetCachedImage(const std::wstring& path) {
+    EnterCriticalSection(&g_cacheLock);
+    for (auto& entry : g_imageCache) {
+        if (entry.ready && entry.path == path && entry.image) {
+            Image* img = entry.image;
+            entry.image = nullptr;
+            entry.ready = false;
+            LeaveCriticalSection(&g_cacheLock);
+            return img;
+        }
+    }
+    LeaveCriticalSection(&g_cacheLock);
+    return nullptr;
+}
+
+size_t GetCacheTarget() {
+    return g_cacheTargetIndex;
+}
+
+size_t GetImageCount() {
+    EnterCriticalSection(&g_cacheLock);
+    size_t count = g_imageFiles.size();
+    LeaveCriticalSection(&g_cacheLock);
+    return count;
+}
+
+std::wstring GetImagePath(size_t index) {
+    EnterCriticalSection(&g_cacheLock);
+    std::wstring path;
+    if (index < g_imageFiles.size()) {
+        path = g_imageFiles[index];
+    }
+    LeaveCriticalSection(&g_cacheLock);
+    return path;
+}
+
+DWORD WINAPI CacheWorker(LPVOID lpParam) {
+    while (g_cacheRunning) {
+        // Wait until image list is ready
+        if (!g_cacheReady) {
+            Sleep(100);
+            continue;
+        }
+        
+        size_t target = GetCacheTarget();
+        size_t imgCount = GetImageCount();
+        
+        if (imgCount == 0) {
+            Sleep(100);
+            continue;
+        }
+        
+        // Determine which images to cache
+        std::vector<size_t> toCache;
+        for (int offset = -CACHE_SIZE; offset <= CACHE_SIZE; ++offset) {
+            if (offset == 0) continue;
+            size_t idx = (target + offset + imgCount) % imgCount;
+            toCache.push_back(idx);
+        }
+        
+        // Load missing images into cache
+        for (size_t idx : toCache) {
+            if (!g_cacheRunning) break;
+            
+            std::wstring path = GetImagePath(idx);
+            if (path.empty()) continue;
+            
+            // Check if already cached
+            bool alreadyCached = false;
+            EnterCriticalSection(&g_cacheLock);
+            for (auto& entry : g_imageCache) {
+                if (entry.path == path && (entry.ready || entry.loading)) {
+                    alreadyCached = true;
+                    break;
+                }
+            }
+            LeaveCriticalSection(&g_cacheLock);
+            
+            if (alreadyCached) continue;
+            
+            // Find or create cache slot
+            CachedImage* slot = nullptr;
+            EnterCriticalSection(&g_cacheLock);
+            
+            // Try to find empty slot
+            for (auto& entry : g_imageCache) {
+                if (!entry.ready && !entry.loading) {
+                    slot = &entry;
+                    break;
+                }
+            }
+            
+            // If no empty slot, evict oldest
+            if (!slot && g_imageCache.size() < (CACHE_SIZE * 2 + 2)) {
+                g_imageCache.emplace_back();
+                slot = &g_imageCache.back();
+            }
+            
+            if (!slot && !g_imageCache.empty()) {
+                // Find oldest entry to evict
+                for (auto& entry : g_imageCache) {
+                    slot = &entry;
+                    entry.clear();
+                    break;
+                }
+            }
+            
+            if (slot) {
+                slot->path = path;
+                slot->loading = true;
+            }
+            LeaveCriticalSection(&g_cacheLock);
+            
+            if (slot) {
+                // Load image outside lock
+                Image* img = nullptr;
+                try {
+                    img = new Image(path.c_str());
+                } catch (...) {
+                    img = nullptr;
+                }
+                
+                EnterCriticalSection(&g_cacheLock);
+                if (g_cacheRunning) {
+                    slot->image = img;
+                    slot->loading = false;
+                    slot->ready = (img && img->GetLastStatus() == Ok);
+                    if (!slot->ready && img) {
+                        delete img;
+                        slot->image = nullptr;
+                    }
+                } else {
+                    if (img) delete img;
+                    slot->clear();
+                }
+                LeaveCriticalSection(&g_cacheLock);
+            }
+        }
+        
+        Sleep(50);
+    }
+    return 0;
+}
+
+void InitCache() {
+    InitializeCriticalSection(&g_cacheLock);
+    g_imageCache.clear();
+    g_imageCache.reserve(CACHE_SIZE * 2 + 2);
+}
+
+void ClearCache() {
+    EnterCriticalSection(&g_cacheLock);
+    for (auto& entry : g_imageCache) {
+        entry.clear();
+    }
+    LeaveCriticalSection(&g_cacheLock);
 }
 
 void UpdateTitle() {
@@ -128,16 +378,38 @@ void LoadImage(size_t index) {
         delete g_currentImage;
         g_currentImage = nullptr;
     }
-    if (index >= g_imageFiles.size()) return;
+    
+    EnterCriticalSection(&g_cacheLock);
+    size_t fileCount = g_imageFiles.size();
+    LeaveCriticalSection(&g_cacheLock);
+    
+    if (index >= fileCount) return;
 
     g_currentIndex = index;
-    g_currentImage = new Image(g_imageFiles[index].c_str());
+    std::wstring path = GetImagePath(index);
+    if (path.empty()) return;
+    
+    // Try to get from cache first
+    g_currentImage = GetCachedImage(path);
+    
+    // If not in cache, load directly
+    if (!g_currentImage) {
+        try {
+            g_currentImage = new Image(path.c_str());
+        } catch (...) {
+            g_currentImage = nullptr;
+        }
+    }
+    
     g_zoom = 1.0f;
     g_panOffset = {0, 0};
     g_fitToWindow = true;
     g_rotation = 0;
     UpdateTitle();
     InvalidateRect(g_hwnd, nullptr, FALSE);
+    
+    // Update cache target for background loading
+    g_cacheTargetIndex = index;
 }
 
 void NextImage() {
@@ -239,6 +511,7 @@ void DeleteCurrentImage() {
         }
         DeleteToRecycleBin(currentFile);
         g_imageFiles.clear();
+        ClearCache();
         SetWindowTextW(g_hwnd, L"wpic");
         InvalidateRect(g_hwnd, nullptr, FALSE);
         return;
@@ -267,7 +540,7 @@ LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
             // Version
-            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.5",
+            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.6",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 0, 65, 400, 25, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             SendMessageW(hVersion, WM_SETFONT, (WPARAM)CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
@@ -665,6 +938,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 0, rc.bottom - TOOLBAR_HEIGHT, rc.right, TOOLBAR_HEIGHT,
                 hwnd, nullptr, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
 
+            // Initialize cache (don't start thread yet)
+            InitCache();
+
             return 0;
         }
 
@@ -677,8 +953,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             DragQueryFileW(hDrop, 0, filePath, MAX_PATH);
             DragFinish(hDrop);
 
+            StopCacheThread();
             ScanFolder(filePath);
-            LoadImage(0);
+            ClearCache();
+            WakeCacheThread();  // Signal cache that image list is ready
+            StartCacheThread(); // Start cache thread after image list is populated
+            LoadImage(g_currentIndex);
             return 0;
         }
 
@@ -761,11 +1041,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     break;
                 case VK_DELETE: DeleteCurrentImage(); break;
-                case VK_ESCAPE: PostQuitMessage(0); break;
+                case VK_ESCAPE: 
+                    StopCacheThread();
+                    PostQuitMessage(0); 
+                    break;
             }
             return 0;
 
         case WM_DESTROY:
+            StopCacheThread();
+            DeleteCriticalSection(&g_cacheLock);
             if (g_hMenu) DestroyMenu(g_hMenu);
             PostQuitMessage(0);
             return 0;
@@ -815,7 +1100,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLineAnsi, int nCmd
             cmdLine = cmdLine.substr(1, cmdLine.length() - 2);
         }
         ScanFolder(cmdLine);
-        LoadImage(0);
+        // Load the specific image that was requested, not index 0
+        WakeCacheThread();
+        StartCacheThread();
+        LoadImage(g_currentIndex);
     }
 
     MSG msg;
