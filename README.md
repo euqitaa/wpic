@@ -54,7 +54,7 @@ Standard Windows title bar with centered toolbar at bottom:
 
 3. **Build executable**:
    ```bash
-   g++ -O2 -s wpic.cpp wpic_res.o -o wpic.exe -municode -lgdiplus -luser32 -lgdi32 -lshell32 -mwindows
+   g++ -O2 -s wpic.cpp wpic_res.o -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32 -fexceptions
    ```
 
 ### MSVC Alternative
