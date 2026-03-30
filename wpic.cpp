@@ -1,6 +1,5 @@
-
 // wpic - Minimal Image Viewer for Windows
-// Build: g++ -O2 -s wpic.cpp -o wpic.exe -municode -lgdiplus -luser32 -lgdi32 -lshell32 -mwindows
+// Build: g++ -O2 -s wpic.cpp -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -774,15 +773,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdShow) {
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLineAnsi, int nCmdShow) {
     GdiplusStartupInput gdiplusStartupInput;
     ULONG_PTR gdiplusToken;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
+    // Convert ANSI command line to wide char to maintain compatibility with existing code
+    int wideLen = MultiByteToWideChar(CP_ACP, 0, lpCmdLineAnsi, -1, nullptr, 0);
+    std::vector<wchar_t> wideBuffer(wideLen);
+    MultiByteToWideChar(CP_ACP, 0, lpCmdLineAnsi, -1, wideBuffer.data(), wideLen);
+    LPWSTR lpCmdLine = wideBuffer.data();
+
     // Load icon
     HICON hIcon = LoadIconW(hInstance, L"IDI_APPLICATION");
     if (!hIcon) hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
-    if (!hIcon) hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    if (!hIcon) hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512)); // IDI_APPLICATION = 32512
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
