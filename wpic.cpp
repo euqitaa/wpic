@@ -21,6 +21,7 @@
 #endif
 
 #include <gdiplus.h>
+#include <windowsx.h>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -63,10 +64,13 @@ typedef BOOL (WINAPI *SetProcessDPIAwareFunc)(void);
 #define IDM_OPTIONS_DARKMODE 2001
 #define IDM_OPTIONS_ABOUT 2002
 
-// DPI Scale aware constants
-#define BASE_TOOLBAR_HEIGHT 60
-#define BASE_BUTTON_HEIGHT 46
-#define TRACKBAR_WIDTH 200
+// DPI Scale aware constants - INCREASED for better usability
+#define BASE_TOOLBAR_HEIGHT 64
+#define BASE_BUTTON_HEIGHT 48
+#define TRACKBAR_WIDTH 160
+#define TRACKBAR_HEIGHT 20
+#define STATUS_BAR_HEIGHT 22
+#define ZOOM_LABEL_WIDTH 52
 
 // Button IDs
 #define ID_BTN_PREV 1001
@@ -144,7 +148,18 @@ struct CachedImage {
 HWND g_hwnd = nullptr;
 HWND g_hToolbar = nullptr;
 HWND g_hTrackbar = nullptr;
+HWND g_hZoomLabel = nullptr;
+HWND g_hStatusBar = nullptr;
 HMENU g_hMenu = nullptr;
+
+// Trackbar subclass - forwards mousewheel to main window for zoom-to-cursor
+static WNDPROC g_origTrackbarProc = nullptr;
+LRESULT CALLBACK TrackbarSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_MOUSEWHEEL) {
+        return SendMessageW(g_hwnd, WM_MOUSEWHEEL, wParam, lParam);
+    }
+    return CallWindowProcW(g_origTrackbarProc, hwnd, msg, wParam, lParam);
+}
 std::vector<std::wstring> g_imageFiles;
 std::wstring g_currentFolder;
 size_t g_currentIndex = 0;
@@ -409,8 +424,36 @@ void UpdateTitle() {
 
 void UpdateTrackbarPos() {
     if (g_hTrackbar) {
-        SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, (int)(g_zoom * 100));
+        int pos = (int)(g_zoom * 100);
+        if (pos < 10) pos = 10;
+        if (pos > 1000) pos = 1000;
+        SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, pos);
     }
+    if (g_hZoomLabel) {
+        wchar_t buf[16];
+        int pct = (int)(g_zoom * 100 + 0.5f);
+        wsprintfW(buf, L"%d%%", pct);
+        SetWindowTextW(g_hZoomLabel, buf);
+    }
+}
+
+void UpdateStatusBar() {
+    if (!g_hStatusBar) return;
+    wchar_t buf[256] = {};
+    if (!g_imageFiles.empty() && g_currentImage && g_currentImage->GetLastStatus() == Ok) {
+        std::wstring fname = g_imageFiles[g_currentIndex];
+        size_t sl = fname.find_last_of(L'\\');
+        if (sl != std::wstring::npos) fname = fname.substr(sl + 1);
+        int w = g_currentImage->GetWidth();
+        int h = g_currentImage->GetHeight();
+        int pct = (int)(g_zoom * 100 + 0.5f);
+        wsprintfW(buf, L"  %s    %d × %d px    %d of %d",
+            fname.c_str(), w, h,
+            (int)(g_currentIndex + 1), (int)g_imageFiles.size());
+    } else if (g_imageFiles.empty()) {
+        wcscpy(buf, L"  Drop an image to open");
+    }
+    SetWindowTextW(g_hStatusBar, buf);
 }
 
 void LoadImage(size_t index) {
@@ -445,6 +488,7 @@ void LoadImage(size_t index) {
     g_rotation = 0;
     UpdateTrackbarPos();
     UpdateTitle();
+    UpdateStatusBar();
     InvalidateRect(g_hwnd, nullptr, FALSE);
     
     g_cacheTargetIndex = index;
@@ -467,6 +511,7 @@ void ToggleZoom() {
         g_panOffset = {0, 0};
     }
     UpdateTrackbarPos();
+    UpdateStatusBar();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -474,13 +519,15 @@ void ZoomIn() {
     g_fitToWindow = false;
     g_zoom = (std::min)(g_zoom * 1.25f, 10.0f);
     UpdateTrackbarPos();
+    UpdateStatusBar();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void ZoomOut() {
     g_fitToWindow = false;
-    g_zoom = (std::max)(g_zoom / 1.25f, 0.1f);
+    g_zoom = (std::max)(g_zoom / 1.25f, 0.05f);
     UpdateTrackbarPos();
+    UpdateStatusBar();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -489,6 +536,7 @@ void ActualSize() {
     g_zoom = 1.0f;
     g_panOffset = {0, 0};
     UpdateTrackbarPos();
+    UpdateStatusBar();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -516,6 +564,8 @@ void ToggleDarkMode() {
 
     InvalidateRect(g_hwnd, nullptr, FALSE);
     if (g_hToolbar) InvalidateRect(g_hToolbar, nullptr, FALSE);
+    if (g_hStatusBar) InvalidateRect(g_hStatusBar, nullptr, FALSE);
+    if (g_hZoomLabel) InvalidateRect(g_hZoomLabel, nullptr, FALSE);
 }
 
 void DeleteToRecycleBin(const std::wstring& filePath) {
@@ -577,7 +627,7 @@ LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 0, Scale(20), Scale(400), Scale(40), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)CreateFontW(Scale(24), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
-            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.7",
+            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 1.0",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 0, Scale(65), Scale(400), Scale(25), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             SendMessageW(hVersion, WM_SETFONT, (WPARAM)CreateFontW(Scale(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
@@ -656,40 +706,44 @@ void ShowAboutDialog() {
 void GetButtonLayout(int windowWidth, int trackbarWidth, ButtonDef* buttons, int& count) {
     count = 9;
 
-    buttons[0] = {ID_BTN_PREV, L"◄", L"Previous", 0, Scale(80)};
-    buttons[1] = {ID_BTN_NEXT, L"►", L"Next", 0, Scale(60)};
-    buttons[2] = {ID_BTN_ZOOM_OUT, L"⊖", L"Zoom out", 0, Scale(80)};
-    buttons[3] = {ID_BTN_ZOOM_IN, L"⊕", L"Zoom in", 0, Scale(70)};
-    buttons[4] = {ID_BTN_FIT, L"□", L"Fit to window", 0, Scale(100)};
-    buttons[5] = {ID_BTN_ACTUAL, L"1:1", L"Actual size", 0, Scale(80)};
-    buttons[6] = {ID_BTN_ROTATE_LEFT, L"↺", L"Rotate left", 0, Scale(90)};
-    buttons[7] = {ID_BTN_ROTATE_RIGHT, L"↻", L"Rotate right", 0, Scale(95)};
-    buttons[8] = {ID_BTN_DELETE, L"✕", L"Delete", 0, Scale(65)};
+    // Compact but readable button widths
+    buttons[0] = {ID_BTN_PREV, L"◄", L"Prev", 0, Scale(55)};
+    buttons[1] = {ID_BTN_NEXT, L"►", L"Next", 0, Scale(55)};
+    buttons[2] = {ID_BTN_ZOOM_OUT, L"−", L"Out", 0, Scale(50)};
+    buttons[3] = {ID_BTN_ZOOM_IN, L"+", L"In", 0, Scale(50)};
+    buttons[4] = {ID_BTN_FIT, L"□", L"Fit", 0, Scale(55)};
+    buttons[5] = {ID_BTN_ACTUAL, L"1:1", L"Actual", 0, Scale(60)};
+    buttons[6] = {ID_BTN_ROTATE_LEFT, L"↺", L"Left", 0, Scale(60)};
+    buttons[7] = {ID_BTN_ROTATE_RIGHT, L"↻", L"Right", 0, Scale(60)};
+    buttons[8] = {ID_BTN_DELETE, L"✕", L"Del", 0, Scale(55)};
 
     int totalWidth = Scale(10);
     for (int i = 0; i < count; i++) {
-        totalWidth += buttons[i].width + Scale(4);
-        if (i == 1 || i == 5 || i == 7) totalWidth += Scale(20);
+        totalWidth += buttons[i].width + Scale(3);
+        if (i == 1 || i == 5 || i == 7) totalWidth += Scale(12);
     }
 
-    int availableWidth = windowWidth - trackbarWidth - Scale(30);
+    int availableWidth = windowWidth - trackbarWidth - Scale(ZOOM_LABEL_WIDTH) - Scale(30);
     int startX = (availableWidth - totalWidth) / 2;
     if (startX < Scale(10)) startX = Scale(10);
 
     int x = startX;
     for (int i = 0; i < count; i++) {
         buttons[i].x = x;
-        x += buttons[i].width + Scale(4);
-        if (i == 1 || i == 5 || i == 7) x += Scale(20);
+        x += buttons[i].width + Scale(3);
+        if (i == 1 || i == 5 || i == 7) x += Scale(12);
     }
 }
 
-LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static int hoveredBtn = -1;
-    static int pressedBtn = -1;
+// Forward declarations for toolbar sub-windows
+LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static ButtonDef buttons[9];
     static int btnCount = 0;
-
+    static int hoveredBtn = -1;
+    static int pressedBtn = -1;
+    
     switch (msg) {
         case WM_CREATE: {
             RECT rc;
@@ -705,12 +759,13 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RECT rc;
             GetClientRect(hwnd, &rc);
 
-            COLORREF bgColor = g_darkMode ? RGB(45, 45, 45) : RGB(245, 245, 245);
+            COLORREF bgColor = g_darkMode ? RGB(38, 38, 42) : RGB(248, 248, 250);
             HBRUSH bgBrush = CreateSolidBrush(bgColor);
             FillRect(hdc, &rc, bgBrush);
             DeleteObject(bgBrush);
 
-            COLORREF borderColor = g_darkMode ? RGB(80, 80, 80) : RGB(200, 200, 200);
+            // Top border line - subtle
+            COLORREF borderColor = g_darkMode ? RGB(65, 65, 72) : RGB(210, 210, 215);
             HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
             HPEN oldPen = (HPEN)SelectObject(hdc, pen);
             MoveToEx(hdc, 0, 0, nullptr);
@@ -718,6 +773,7 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SelectObject(hdc, oldPen);
             DeleteObject(pen);
 
+            // Get current layout
             RECT parentRc;
             GetClientRect(GetParent(hwnd), &parentRc);
             GetButtonLayout(parentRc.right, Scale(TRACKBAR_WIDTH), buttons, btnCount);
@@ -726,61 +782,88 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
 
-            COLORREF textColor = g_darkMode ? RGB(220, 220, 220) : RGB(60, 60, 60);
-            COLORREF labelColor = g_darkMode ? RGB(180, 180, 180) : RGB(80, 80, 80);
+            COLORREF textColor = g_darkMode ? RGB(225, 225, 230) : RGB(45, 45, 55);
+            COLORREF labelColor = g_darkMode ? RGB(140, 140, 150) : RGB(110, 110, 120);
+
+            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 10);
+            int btnTop = (rc.bottom - btnHeight) / 2;
 
             for (int i = 0; i < btnCount; i++) {
-                RECT btnRc = {buttons[i].x, Scale(7), buttons[i].x + buttons[i].width, Scale(7) + Scale(BASE_BUTTON_HEIGHT - 8)};
+                RECT btnRc = {buttons[i].x, btnTop, buttons[i].x + buttons[i].width, btnTop + btnHeight};
                 bool hovered = (pt.x >= btnRc.left && pt.x < btnRc.right && pt.y >= btnRc.top && pt.y < btnRc.bottom);
                 bool pressed = (pressedBtn == buttons[i].id);
+                bool isDelete = (buttons[i].id == ID_BTN_DELETE);
 
+                // Button background with rounded feel via layered rects
                 COLORREF btnBgColor;
-                if (pressed) btnBgColor = g_darkMode ? RGB(70, 70, 70) : RGB(200, 200, 200);
-                else if (hovered) btnBgColor = g_darkMode ? RGB(60, 60, 60) : RGB(230, 230, 230);
-                else btnBgColor = bgColor;
+                if (pressed) {
+                    btnBgColor = isDelete ? (g_darkMode ? RGB(120, 40, 40) : RGB(210, 80, 80))
+                                          : (g_darkMode ? RGB(65, 65, 75) : RGB(195, 195, 205));
+                } else if (hovered) {
+                    btnBgColor = isDelete ? (g_darkMode ? RGB(90, 35, 35) : RGB(255, 220, 220))
+                                          : (g_darkMode ? RGB(55, 55, 65) : RGB(225, 225, 235));
+                } else {
+                    btnBgColor = bgColor;
+                }
 
-                HBRUSH brush = CreateSolidBrush(btnBgColor);
-                FillRect(hdc, &btnRc, brush);
-                DeleteObject(brush);
+                // Draw a rounded rectangle for the button
+                if (pressed || hovered) {
+                    HBRUSH brush = CreateSolidBrush(btnBgColor);
+                    // Simple rounded rect: draw normal rect then paint corners
+                    RECT inflated = {btnRc.left - 1, btnRc.top - 1, btnRc.right + 1, btnRc.bottom + 1};
+                    FillRect(hdc, &btnRc, brush);
+                    DeleteObject(brush);
 
-                if (hovered || pressed) {
-                    COLORREF btnBorderColor = g_darkMode ? RGB(100, 100, 100) : RGB(180, 180, 180);
+                    // Rounded border
+                    COLORREF btnBorderColor = isDelete 
+                        ? (g_darkMode ? RGB(160, 60, 60) : RGB(220, 100, 100))
+                        : (g_darkMode ? RGB(85, 85, 100) : RGB(190, 190, 205));
                     HPEN borderPen = CreatePen(PS_SOLID, 1, btnBorderColor);
                     HPEN oldBorderPen = (HPEN)SelectObject(hdc, borderPen);
-                    HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    Rectangle(hdc, btnRc.left, btnRc.top, btnRc.right, btnRc.bottom);
+                    HBRUSH oldBrush2 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    RoundRect(hdc, btnRc.left, btnRc.top, btnRc.right, btnRc.bottom, Scale(5), Scale(5));
                     SelectObject(hdc, oldBorderPen);
-                    SelectObject(hdc, oldBrush);
+                    SelectObject(hdc, oldBrush2);
                     DeleteObject(borderPen);
                 }
 
+                // Separator lines between groups
                 if (i == 1 || i == 5 || i == 7) {
-                    int sepX = btnRc.right + Scale(10);
-                    COLORREF sepPenColor = g_darkMode ? RGB(80, 80, 80) : RGB(200, 200, 200);
+                    int sepX = btnRc.right + Scale(6);
+                    COLORREF sepPenColor = g_darkMode ? RGB(65, 65, 75) : RGB(210, 210, 218);
                     HPEN sepPen = CreatePen(PS_SOLID, 1, sepPenColor);
                     HPEN oldSepPen = (HPEN)SelectObject(hdc, sepPen);
-                    MoveToEx(hdc, sepX, Scale(14), nullptr);
-                    LineTo(hdc, sepX, Scale(BASE_TOOLBAR_HEIGHT - 14));
+                    MoveToEx(hdc, sepX, btnTop + Scale(6), nullptr);
+                    LineTo(hdc, sepX, btnTop + btnHeight - Scale(6));
                     SelectObject(hdc, oldSepPen);
                     DeleteObject(sepPen);
                 }
 
+                // Symbol
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, textColor);
-                HFONT symbolFont = CreateFontW(Scale(32), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
+                COLORREF symColor = (isDelete && hovered && !pressed) 
+                    ? (g_darkMode ? RGB(255, 100, 100) : RGB(200, 50, 50))
+                    : textColor;
+                SetTextColor(hdc, symColor);
+                HFONT symbolFont = CreateFontW(Scale(18), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
                 HFONT oldFont = (HFONT)SelectObject(hdc, symbolFont);
 
-                RECT symbolRect = {btnRc.left, btnRc.top + Scale(2), btnRc.right, btnRc.top + Scale(30)};
+                RECT symbolRect = {btnRc.left, btnRc.top + Scale(2), btnRc.right, btnRc.top + Scale(22)};
                 DrawTextW(hdc, buttons[i].symbol, -1, &symbolRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(hdc, oldFont);
                 DeleteObject(symbolFont);
 
+                // Label
                 SetTextColor(hdc, labelColor);
-                HFONT labelFont = CreateFontW(Scale(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                HFONT labelFont = CreateFontW(Scale(9), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
                 oldFont = (HFONT)SelectObject(hdc, labelFont);
 
-                RECT labelRect = {btnRc.left, btnRc.top + Scale(28), btnRc.right, btnRc.bottom - Scale(3)};
+                RECT labelRect = {btnRc.left, btnRc.top + Scale(20), btnRc.right, btnRc.bottom - Scale(1)};
                 DrawTextW(hdc, buttons[i].label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(hdc, oldFont);
@@ -795,9 +878,13 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
 
+            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 10);
+            int btnTop = (Scale(BASE_TOOLBAR_HEIGHT) - btnHeight) / 2;
+
             int newHover = -1;
             for (int i = 0; i < btnCount; i++) {
-                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && y >= Scale(7) && y < Scale(7) + Scale(BASE_BUTTON_HEIGHT - 8)) {
+                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && 
+                    y >= btnTop && y < btnTop + btnHeight) {
                     newHover = buttons[i].id;
                     break;
                 }
@@ -814,8 +901,12 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
 
+            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 10);
+            int btnTop = (Scale(BASE_TOOLBAR_HEIGHT) - btnHeight) / 2;
+
             for (int i = 0; i < btnCount; i++) {
-                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && y >= Scale(7) && y < Scale(7) + Scale(BASE_BUTTON_HEIGHT - 8)) {
+                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && 
+                    y >= btnTop && y < btnTop + btnHeight) {
                     pressedBtn = buttons[i].id;
                     InvalidateRect(hwnd, nullptr, FALSE);
                     break;
@@ -844,8 +935,10 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetButtonLayout(parentRc.right, Scale(TRACKBAR_WIDTH), buttons, btnCount);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
+            
+        default:
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 void Render(HWND hwnd) {
@@ -855,15 +948,31 @@ void Render(HWND hwnd) {
     RECT clientRect;
     GetClientRect(hwnd, &clientRect);
     int width = clientRect.right;
-    int height = clientRect.bottom - Scale(BASE_TOOLBAR_HEIGHT);
+    int height = clientRect.bottom - Scale(BASE_TOOLBAR_HEIGHT) - Scale(STATUS_BAR_HEIGHT);
 
     HDC memDC = CreateCompatibleDC(hdc);
     HBITMAP memBitmap = CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
 
-    Color bgColor = g_darkMode ? Color(30, 30, 30) : Color(240, 240, 240);
+    Color bgColor = g_darkMode ? Color(28, 28, 32) : Color(235, 235, 240);
     Graphics graphics(memDC);
     graphics.Clear(bgColor);
+
+    // Draw status bar background area
+    {
+        int sbH = Scale(STATUS_BAR_HEIGHT);
+        RECT sbRect = {0, clientRect.bottom - sbH, clientRect.right, clientRect.bottom};
+        HBRUSH sbBrush = CreateSolidBrush(g_darkMode ? RGB(30, 30, 33) : RGB(225, 225, 230));
+        FillRect(memDC, &sbRect, sbBrush);
+        DeleteObject(sbBrush);
+        // Thin top border
+        HPEN sbPen = CreatePen(PS_SOLID, 1, g_darkMode ? RGB(55, 55, 62) : RGB(205, 205, 210));
+        HPEN oldSbPen = (HPEN)SelectObject(memDC, sbPen);
+        MoveToEx(memDC, 0, sbRect.top, nullptr);
+        LineTo(memDC, clientRect.right, sbRect.top);
+        SelectObject(memDC, oldSbPen);
+        DeleteObject(sbPen);
+    }
 
     if (g_currentImage && g_currentImage->GetLastStatus() == Ok) {
         int imgWidth = g_currentImage->GetWidth();
@@ -939,9 +1048,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             AppendMenuW(g_hMenu, MF_POPUP, (UINT_PTR)hOptionsMenu, L"Options");
             SetMenu(hwnd, g_hMenu);
 
+            // Create toolbar container window (for buttons only)
             WNDCLASSEXW wc = {};
             wc.cbSize = sizeof(WNDCLASSEXW);
-            wc.lpfnWndProc = ToolbarWndProc;
+            wc.lpfnWndProc = ToolbarParentWndProc;
             wc.hInstance = ((LPCREATESTRUCT)lParam)->hInstance;
             wc.lpszClassName = L"wpicToolbar";
             wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
@@ -950,19 +1060,54 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             RECT rc;
             GetClientRect(hwnd, &rc);
-            g_hToolbar = CreateWindowExW(0, L"wpicToolbar", nullptr,
-                WS_CHILD | WS_VISIBLE,
-                0, rc.bottom - Scale(BASE_TOOLBAR_HEIGHT), rc.right, Scale(BASE_TOOLBAR_HEIGHT),
+            int toolbarHeight = Scale(BASE_TOOLBAR_HEIGHT);
+            int statusBarHeight = Scale(STATUS_BAR_HEIGHT);
+            
+            // Status bar at very bottom
+            g_hStatusBar = CreateWindowExW(0, L"STATIC", L"  Drop an image to open",
+                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+                0, rc.bottom - statusBarHeight, rc.right, statusBarHeight,
                 hwnd, nullptr, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
 
+            g_hToolbar = CreateWindowExW(0, L"wpicToolbar", nullptr,
+                WS_CHILD | WS_VISIBLE,
+                0, rc.bottom - toolbarHeight - statusBarHeight, rc.right, toolbarHeight,
+                hwnd, nullptr, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+
+            // Trackbar (zoom slider) — positioned right side of toolbar
+            int trackY = rc.bottom - toolbarHeight - statusBarHeight + (toolbarHeight - Scale(TRACKBAR_HEIGHT)) / 2;
             g_hTrackbar = CreateWindowExW(0, TRACKBAR_CLASSW, nullptr,
-                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS | TBS_TOOLTIPS,
-                0, 0, 0, 0,
-                g_hToolbar, (HMENU)1010, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                rc.right - Scale(TRACKBAR_WIDTH) - Scale(ZOOM_LABEL_WIDTH) - Scale(15),
+                trackY,
+                Scale(TRACKBAR_WIDTH),
+                Scale(TRACKBAR_HEIGHT),
+                hwnd, (HMENU)1010, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+            
             SendMessageW(g_hTrackbar, TBM_SETRANGE, TRUE, MAKELPARAM(10, 1000));
             SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, 100);
+            // Subclass trackbar to forward mousewheel to main window
+            g_origTrackbarProc = (WNDPROC)SetWindowLongPtrW(g_hTrackbar, GWLP_WNDPROC, (LONG_PTR)TrackbarSubclassProc);
+
+            // Zoom % label to the right of trackbar
+            g_hZoomLabel = CreateWindowExW(0, L"STATIC", L"100%",
+                WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX,
+                rc.right - Scale(ZOOM_LABEL_WIDTH) - Scale(8),
+                rc.bottom - toolbarHeight - statusBarHeight + (toolbarHeight - Scale(20)) / 2,
+                Scale(ZOOM_LABEL_WIDTH), Scale(20),
+                hwnd, nullptr, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
 
             InitCache();
+
+            // Set fonts on static controls
+            HFONT hStatusFont = CreateFontW(Scale(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            if (g_hStatusBar) SendMessageW(g_hStatusBar, WM_SETFONT, (WPARAM)hStatusFont, TRUE);
+            HFONT hZoomFont = CreateFontW(Scale(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            if (g_hZoomLabel) SendMessageW(g_hZoomLabel, WM_SETFONT, (WPARAM)hZoomFont, TRUE);
 
             return 0;
         }
@@ -1004,22 +1149,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_SIZE: {
-            if (g_hToolbar) {
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                int toolbarHeight = Scale(BASE_TOOLBAR_HEIGHT);
-                SetWindowPos(g_hToolbar, nullptr, 0, rc.bottom - toolbarHeight, rc.right, toolbarHeight, SWP_NOZORDER);
-                
-                if (g_hTrackbar) {
-                    int trackbarWidth = Scale(TRACKBAR_WIDTH);
-                    int trackbarHeight = Scale(20);
-                    int margin = Scale(10);
-                    SetWindowPos(g_hTrackbar, nullptr, 
-                        rc.right - trackbarWidth - margin, 
-                        (toolbarHeight - trackbarHeight) / 2,
-                        trackbarWidth, trackbarHeight, SWP_NOZORDER);
-                }
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            int toolbarHeight = Scale(BASE_TOOLBAR_HEIGHT);
+            int statusBarHeight = Scale(STATUS_BAR_HEIGHT);
+            int trackbarTop = rc.bottom - toolbarHeight - statusBarHeight + (toolbarHeight - Scale(TRACKBAR_HEIGHT)) / 2;
+            
+            if (g_hStatusBar) {
+                SetWindowPos(g_hStatusBar, nullptr, 0, rc.bottom - statusBarHeight,
+                    rc.right, statusBarHeight, SWP_NOZORDER);
             }
+            if (g_hToolbar) {
+                SetWindowPos(g_hToolbar, nullptr, 0, rc.bottom - toolbarHeight - statusBarHeight,
+                    rc.right, toolbarHeight, SWP_NOZORDER);
+            }
+            if (g_hTrackbar) {
+                SetWindowPos(g_hTrackbar, nullptr, 
+                    rc.right - Scale(TRACKBAR_WIDTH) - Scale(ZOOM_LABEL_WIDTH) - Scale(15),
+                    trackbarTop,
+                    Scale(TRACKBAR_WIDTH), Scale(TRACKBAR_HEIGHT), SWP_NOZORDER);
+            }
+            if (g_hZoomLabel) {
+                SetWindowPos(g_hZoomLabel, nullptr,
+                    rc.right - Scale(ZOOM_LABEL_WIDTH) - Scale(8),
+                    rc.bottom - toolbarHeight - statusBarHeight + (toolbarHeight - Scale(20)) / 2,
+                    Scale(ZOOM_LABEL_WIDTH), Scale(20), SWP_NOZORDER);
+            }
+            
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1029,6 +1185,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 int pos = (int)SendMessageW(g_hTrackbar, TBM_GETPOS, 0, 0);
                 g_zoom = pos / 100.0f;
                 g_fitToWindow = false;
+                // Update zoom label
+                if (g_hZoomLabel) {
+                    wchar_t buf[16];
+                    wsprintfW(buf, L"%d%%", pos);
+                    SetWindowTextW(g_hZoomLabel, buf);
+                }
+                UpdateStatusBar();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -1051,10 +1214,87 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = (HDC)wParam;
+            HWND hCtrl = (HWND)lParam;
+            if (hCtrl == g_hZoomLabel) {
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, g_darkMode ? RGB(180, 180, 180) : RGB(80, 80, 80));
+                // Return toolbar background brush
+                static HBRUSH hBrLight = nullptr, hBrDark = nullptr;
+                if (g_darkMode) {
+                    if (!hBrDark) hBrDark = CreateSolidBrush(RGB(45, 45, 45));
+                    return (LRESULT)hBrDark;
+                } else {
+                    if (!hBrLight) hBrLight = CreateSolidBrush(RGB(245, 245, 245));
+                    return (LRESULT)hBrLight;
+                }
+            }
+            if (hCtrl == g_hStatusBar) {
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, g_darkMode ? RGB(160, 160, 160) : RGB(100, 100, 100));
+                static HBRUSH hBrStatusLight = nullptr, hBrStatusDark = nullptr;
+                if (g_darkMode) {
+                    if (!hBrStatusDark) hBrStatusDark = CreateSolidBrush(RGB(35, 35, 35));
+                    return (LRESULT)hBrStatusDark;
+                } else {
+                    if (!hBrStatusLight) hBrStatusLight = CreateSolidBrush(RGB(230, 230, 230));
+                    return (LRESULT)hBrStatusLight;
+                }
+            }
+            break;
+        }
+
         case WM_MOUSEWHEEL: {
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-            if (delta > 0) ZoomIn();
-            else ZoomOut();
+            // Get mouse position relative to client window
+            POINT pt;
+            pt.x = GET_X_LPARAM(lParam);
+            pt.y = GET_Y_LPARAM(lParam);
+            ScreenToClient(hwnd, &pt);
+
+            RECT clientRect;
+            GetClientRect(hwnd, &clientRect);
+            int viewHeight = clientRect.bottom - Scale(BASE_TOOLBAR_HEIGHT) - Scale(STATUS_BAR_HEIGHT);
+
+            // Only zoom-to-cursor when not in fit mode
+            float oldZoom = g_zoom;
+            float newZoom;
+            if (delta > 0) {
+                newZoom = (std::min)(oldZoom * 1.15f, 10.0f);
+            } else {
+                newZoom = (std::max)(oldZoom / 1.15f, 0.05f);
+            }
+
+            if (g_fitToWindow) {
+                // Exit fit mode, compute the actual rendered scale first
+                if (g_currentImage) {
+                    bool rotated90 = (g_rotation == 90 || g_rotation == 270);
+                    int imgW = g_currentImage->GetWidth();
+                    int imgH = g_currentImage->GetHeight();
+                    int rW = rotated90 ? imgH : imgW;
+                    int rH = rotated90 ? imgW : imgH;
+                    int viewW = clientRect.right;
+                    float scaleX = (float)(viewW - Scale(20)) / rW;
+                    float scaleY = (float)(viewHeight - Scale(20)) / rH;
+                    oldZoom = (std::min)(scaleX, scaleY);
+                }
+                g_fitToWindow = false;
+                newZoom = (delta > 0) ? (std::min)(oldZoom * 1.15f, 10.0f)
+                                      : (std::max)(oldZoom / 1.15f, 0.05f);
+            }
+
+            // Zoom toward cursor: adjust pan so point under cursor stays fixed
+            float zoomRatio = newZoom / oldZoom;
+            // Current image center offset from view center
+            int cx = clientRect.right / 2;
+            int cy = viewHeight / 2;
+            g_panOffset.x = (int)((g_panOffset.x - (pt.x - cx)) * zoomRatio + (pt.x - cx));
+            g_panOffset.y = (int)((g_panOffset.y - (pt.y - cy)) * zoomRatio + (pt.y - cy));
+
+            g_zoom = newZoom;
+            UpdateTrackbarPos();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
 
