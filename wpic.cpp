@@ -1,10 +1,20 @@
 // wpic - Minimal Image Viewer for Windows
-// Build: g++ -O2 -s wpic.cpp -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32 -fexceptions
+// Build: g++ -O2 -s wpic.cpp wpic_res.o -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32 -lcomctl32 -lshlwapi -lole32 -fexceptions
+
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600  // Windows Vista minimum
+#endif
+
+#ifndef _WIN32_IE
+#define _WIN32_IE 0x0600     // IE6/Windows XP SP2
+#endif
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <objbase.h>     // Must be before shellapi.h for REFIID
 #include <shellapi.h>
+#include <commctrl.h>
 
 #ifndef _WIN32_WCE
 #include <wtypes.h>
@@ -20,16 +30,43 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "ole32.lib")
 
 using namespace Gdiplus;
+
+// Compatibility defines for older MinGW/Windows SDK
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
+#ifndef TBS_TOOLTIPS
+#define TBS_TOOLTIPS 0x0100
+#endif
+
+#ifndef DPI_AWARENESS_CONTEXT
+DECLARE_HANDLE(DPI_AWARENESS_CONTEXT);
+#define DPI_AWARENESS_CONTEXT_UNAWARE ((DPI_AWARENESS_CONTEXT)-1)
+#define DPI_AWARENESS_CONTEXT_SYSTEM_AWARE ((DPI_AWARENESS_CONTEXT)-2)
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE ((DPI_AWARENESS_CONTEXT)-3)
+#define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 ((DPI_AWARENESS_CONTEXT)-4)
+#endif
+
+// Function pointer typedefs for DPI awareness
+typedef BOOL (WINAPI *SetProcessDpiAwarenessContextFunc)(DPI_AWARENESS_CONTEXT);
+typedef int (WINAPI *GetDpiForSystemFunc)(void);
+typedef UINT (WINAPI *GetDpiForWindowFunc)(HWND);
+typedef BOOL (WINAPI *SetProcessDPIAwareFunc)(void);
 
 // Menu IDs
 #define IDM_OPTIONS_DARKMODE 2001
 #define IDM_OPTIONS_ABOUT 2002
 
-// Toolbar constants
-#define TOOLBAR_HEIGHT 60
-#define BUTTON_HEIGHT 46
+// DPI Scale aware constants
+#define BASE_TOOLBAR_HEIGHT 60
+#define BASE_BUTTON_HEIGHT 46
+#define TRACKBAR_WIDTH 200
 
 // Button IDs
 #define ID_BTN_PREV 1001
@@ -63,11 +100,9 @@ struct CachedImage {
     
     CachedImage() : image(nullptr), loading(false), ready(false) {}
     
-    // Disable copy
     CachedImage(const CachedImage&) = delete;
     CachedImage& operator=(const CachedImage&) = delete;
     
-    // Enable move
     CachedImage(CachedImage&& other) noexcept 
         : path(std::move(other.path)), 
           image(other.image),
@@ -108,6 +143,7 @@ struct CachedImage {
 // Global state
 HWND g_hwnd = nullptr;
 HWND g_hToolbar = nullptr;
+HWND g_hTrackbar = nullptr;
 HMENU g_hMenu = nullptr;
 std::vector<std::wstring> g_imageFiles;
 std::wstring g_currentFolder;
@@ -121,16 +157,24 @@ POINT g_lastMousePos = {0, 0};
 int g_rotation = 0;
 bool g_darkMode = false;
 
+// DPI globals
+int g_dpi = 96;
+float g_dpiScale = 1.0f;
+
 // Cache state
 std::vector<CachedImage> g_imageCache;
 CRITICAL_SECTION g_cacheLock;
 HANDLE g_cacheThread = nullptr;
 volatile bool g_cacheRunning = false;
 volatile size_t g_cacheTargetIndex = 0;
-volatile bool g_cacheReady = false;  // Set to true when image list is ready
+volatile bool g_cacheReady = false;
 
 // Supported extensions
 const wchar_t* g_supportedExts[] = {L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".tiff", L".tif", L".webp", nullptr};
+
+int Scale(int value) {
+    return (int)(value * g_dpiScale);
+}
 
 bool IsImageFile(const std::wstring& filename) {
     size_t dotPos = filename.find_last_of(L'.');
@@ -167,7 +211,6 @@ void ScanFolder(const std::wstring& targetFile) {
 
     std::sort(g_imageFiles.begin(), g_imageFiles.end());
 
-    // Find the target file index - case insensitive comparison
     g_currentIndex = 0;
     std::wstring targetLower = targetFile;
     std::transform(targetLower.begin(), targetLower.end(), targetLower.begin(), [](wchar_t c){ return std::towlower(c); });
@@ -243,7 +286,6 @@ std::wstring GetImagePath(size_t index) {
 
 DWORD WINAPI CacheWorker(LPVOID lpParam) {
     while (g_cacheRunning) {
-        // Wait until image list is ready
         if (!g_cacheReady) {
             Sleep(100);
             continue;
@@ -257,7 +299,6 @@ DWORD WINAPI CacheWorker(LPVOID lpParam) {
             continue;
         }
         
-        // Determine which images to cache
         std::vector<size_t> toCache;
         for (int offset = -CACHE_SIZE; offset <= CACHE_SIZE; ++offset) {
             if (offset == 0) continue;
@@ -265,14 +306,12 @@ DWORD WINAPI CacheWorker(LPVOID lpParam) {
             toCache.push_back(idx);
         }
         
-        // Load missing images into cache
         for (size_t idx : toCache) {
             if (!g_cacheRunning) break;
             
             std::wstring path = GetImagePath(idx);
             if (path.empty()) continue;
             
-            // Check if already cached
             bool alreadyCached = false;
             EnterCriticalSection(&g_cacheLock);
             for (auto& entry : g_imageCache) {
@@ -285,11 +324,9 @@ DWORD WINAPI CacheWorker(LPVOID lpParam) {
             
             if (alreadyCached) continue;
             
-            // Find or create cache slot
             CachedImage* slot = nullptr;
             EnterCriticalSection(&g_cacheLock);
             
-            // Try to find empty slot
             for (auto& entry : g_imageCache) {
                 if (!entry.ready && !entry.loading) {
                     slot = &entry;
@@ -297,14 +334,12 @@ DWORD WINAPI CacheWorker(LPVOID lpParam) {
                 }
             }
             
-            // If no empty slot, evict oldest
             if (!slot && g_imageCache.size() < (CACHE_SIZE * 2 + 2)) {
                 g_imageCache.emplace_back();
                 slot = &g_imageCache.back();
             }
             
             if (!slot && !g_imageCache.empty()) {
-                // Find oldest entry to evict
                 for (auto& entry : g_imageCache) {
                     slot = &entry;
                     entry.clear();
@@ -319,7 +354,6 @@ DWORD WINAPI CacheWorker(LPVOID lpParam) {
             LeaveCriticalSection(&g_cacheLock);
             
             if (slot) {
-                // Load image outside lock
                 Image* img = nullptr;
                 try {
                     img = new Image(path.c_str());
@@ -373,6 +407,12 @@ void UpdateTitle() {
     SetWindowTextW(g_hwnd, title.c_str());
 }
 
+void UpdateTrackbarPos() {
+    if (g_hTrackbar) {
+        SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, (int)(g_zoom * 100));
+    }
+}
+
 void LoadImage(size_t index) {
     if (g_currentImage) {
         delete g_currentImage;
@@ -389,10 +429,8 @@ void LoadImage(size_t index) {
     std::wstring path = GetImagePath(index);
     if (path.empty()) return;
     
-    // Try to get from cache first
     g_currentImage = GetCachedImage(path);
     
-    // If not in cache, load directly
     if (!g_currentImage) {
         try {
             g_currentImage = new Image(path.c_str());
@@ -405,10 +443,10 @@ void LoadImage(size_t index) {
     g_panOffset = {0, 0};
     g_fitToWindow = true;
     g_rotation = 0;
+    UpdateTrackbarPos();
     UpdateTitle();
     InvalidateRect(g_hwnd, nullptr, FALSE);
     
-    // Update cache target for background loading
     g_cacheTargetIndex = index;
 }
 
@@ -428,18 +466,21 @@ void ToggleZoom() {
         g_zoom = 1.0f;
         g_panOffset = {0, 0};
     }
+    UpdateTrackbarPos();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void ZoomIn() {
     g_fitToWindow = false;
     g_zoom = (std::min)(g_zoom * 1.25f, 10.0f);
+    UpdateTrackbarPos();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void ZoomOut() {
     g_fitToWindow = false;
     g_zoom = (std::max)(g_zoom / 1.25f, 0.1f);
+    UpdateTrackbarPos();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -447,6 +488,7 @@ void ActualSize() {
     g_fitToWindow = false;
     g_zoom = 1.0f;
     g_panOffset = {0, 0};
+    UpdateTrackbarPos();
     InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
@@ -464,7 +506,6 @@ void RotateRight() {
 void ToggleDarkMode() {
     g_darkMode = !g_darkMode;
 
-    // Update menu checkmark
     if (g_hMenu) {
         HMENU hOptionsMenu = GetSubMenu(g_hMenu, 0);
         if (hOptionsMenu) {
@@ -524,38 +565,32 @@ void DeleteCurrentImage() {
     UpdateTitle();
 }
 
-// About dialog window procedure
 LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            // Set dark background if in dark mode
             if (g_darkMode) {
                 SetWindowLongW(hwnd, GWL_EXSTYLE, GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_COMPOSITED);
             }
 
-            // Title
             HWND hTitle = CreateWindowExW(0, L"STATIC", L"wpic",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                0, 20, 400, 40, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-            SendMessageW(hTitle, WM_SETFONT, (WPARAM)CreateFontW(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+                0, Scale(20), Scale(400), Scale(40), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hTitle, WM_SETFONT, (WPARAM)CreateFontW(Scale(24), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
-            // Version
-            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.6",
+            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.7",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                0, 65, 400, 25, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-            SendMessageW(hVersion, WM_SETFONT, (WPARAM)CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+                0, Scale(65), Scale(400), Scale(25), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hVersion, WM_SETFONT, (WPARAM)CreateFontW(Scale(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
-            // Author
             HWND hAuthor = CreateWindowExW(0, L"STATIC", L"by euqitaa",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                0, 95, 400, 25, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
-            SendMessageW(hAuthor, WM_SETFONT, (WPARAM)CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+                0, Scale(95), Scale(400), Scale(25), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hAuthor, WM_SETFONT, (WPARAM)CreateFontW(Scale(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
-            // GitHub link
             HWND hLink = CreateWindowExW(0, L"STATIC", L"https://github.com/euqitaa/wpic",
                 WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,
-                50, 140, 300, 30, hwnd, (HMENU)1001, GetModuleHandleW(nullptr), nullptr);
-            SendMessageW(hLink, WM_SETFONT, (WPARAM)CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
+                Scale(50), Scale(140), Scale(300), Scale(30), hwnd, (HMENU)1001, GetModuleHandleW(nullptr), nullptr);
+            SendMessageW(hLink, WM_SETFONT, (WPARAM)CreateFontW(Scale(12), 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
             return 0;
         }
@@ -570,7 +605,7 @@ LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 0;
 
         case WM_COMMAND:
-            if (LOWORD(wParam) == 1001) { // Link clicked
+            if (LOWORD(wParam) == 1001) {
                 ShellExecuteW(nullptr, L"open", L"https://github.com/euqitaa/wpic", nullptr, nullptr, SW_SHOWNORMAL);
             }
             return 0;
@@ -588,9 +623,7 @@ LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-// Custom About dialog
 void ShowAboutDialog() {
-    // Register dialog class
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.lpfnWndProc = AboutDlgProc;
@@ -600,18 +633,16 @@ void ShowAboutDialog() {
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 
-    // Create dialog window
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         L"wpicAboutDlg", L"About wpic",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 400, 220,
+        CW_USEDEFAULT, CW_USEDEFAULT, Scale(400), Scale(220),
         g_hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
     );
 
     if (!hDlg) return;
 
-    // Center dialog
     RECT rcDlg, rcOwner;
     GetWindowRect(hDlg, &rcDlg);
     GetWindowRect(g_hwnd, &rcOwner);
@@ -619,42 +650,40 @@ void ShowAboutDialog() {
     int y = rcOwner.top + (rcOwner.bottom - rcOwner.top - (rcDlg.bottom - rcDlg.top)) / 2;
     SetWindowPos(hDlg, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_SHOWWINDOW);
 
-    // Disable parent window
     EnableWindow(g_hwnd, FALSE);
 }
 
-// Calculate button layout
-void GetButtonLayout(int windowWidth, ButtonDef* buttons, int& count) {
+void GetButtonLayout(int windowWidth, int trackbarWidth, ButtonDef* buttons, int& count) {
     count = 9;
 
-    buttons[0] = {ID_BTN_PREV, L"◄", L"Previous", 0, 80};
-    buttons[1] = {ID_BTN_NEXT, L"►", L"Next", 0, 60};
-    buttons[2] = {ID_BTN_ZOOM_OUT, L"⊖", L"Zoom out", 0, 80};
-    buttons[3] = {ID_BTN_ZOOM_IN, L"⊕", L"Zoom in", 0, 70};
-    buttons[4] = {ID_BTN_FIT, L"□", L"Fit to window", 0, 100};
-    buttons[5] = {ID_BTN_ACTUAL, L"1:1", L"Actual size", 0, 80};
-    buttons[6] = {ID_BTN_ROTATE_LEFT, L"↺", L"Rotate left", 0, 90};
-    buttons[7] = {ID_BTN_ROTATE_RIGHT, L"↻", L"Rotate right", 0, 95};
-    buttons[8] = {ID_BTN_DELETE, L"✕", L"Delete", 0, 65};
+    buttons[0] = {ID_BTN_PREV, L"◄", L"Previous", 0, Scale(80)};
+    buttons[1] = {ID_BTN_NEXT, L"►", L"Next", 0, Scale(60)};
+    buttons[2] = {ID_BTN_ZOOM_OUT, L"⊖", L"Zoom out", 0, Scale(80)};
+    buttons[3] = {ID_BTN_ZOOM_IN, L"⊕", L"Zoom in", 0, Scale(70)};
+    buttons[4] = {ID_BTN_FIT, L"□", L"Fit to window", 0, Scale(100)};
+    buttons[5] = {ID_BTN_ACTUAL, L"1:1", L"Actual size", 0, Scale(80)};
+    buttons[6] = {ID_BTN_ROTATE_LEFT, L"↺", L"Rotate left", 0, Scale(90)};
+    buttons[7] = {ID_BTN_ROTATE_RIGHT, L"↻", L"Rotate right", 0, Scale(95)};
+    buttons[8] = {ID_BTN_DELETE, L"✕", L"Delete", 0, Scale(65)};
 
-    int totalWidth = 10;
+    int totalWidth = Scale(10);
     for (int i = 0; i < count; i++) {
-        totalWidth += buttons[i].width + 4;
-        if (i == 1 || i == 5 || i == 7) totalWidth += 20;
+        totalWidth += buttons[i].width + Scale(4);
+        if (i == 1 || i == 5 || i == 7) totalWidth += Scale(20);
     }
 
-    int startX = (windowWidth - totalWidth) / 2;
-    if (startX < 10) startX = 10;
+    int availableWidth = windowWidth - trackbarWidth - Scale(30);
+    int startX = (availableWidth - totalWidth) / 2;
+    if (startX < Scale(10)) startX = Scale(10);
 
     int x = startX;
     for (int i = 0; i < count; i++) {
         buttons[i].x = x;
-        x += buttons[i].width + 4;
-        if (i == 1 || i == 5 || i == 7) x += 20;
+        x += buttons[i].width + Scale(4);
+        if (i == 1 || i == 5 || i == 7) x += Scale(20);
     }
 }
 
-// Toolbar window procedure
 LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static int hoveredBtn = -1;
     static int pressedBtn = -1;
@@ -665,7 +694,7 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CREATE: {
             RECT rc;
             GetClientRect(GetParent(hwnd), &rc);
-            GetButtonLayout(rc.right, buttons, btnCount);
+            GetButtonLayout(rc.right, Scale(TRACKBAR_WIDTH), buttons, btnCount);
             return 0;
         }
 
@@ -676,13 +705,11 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             RECT rc;
             GetClientRect(hwnd, &rc);
 
-            // Background - dark or light
             COLORREF bgColor = g_darkMode ? RGB(45, 45, 45) : RGB(245, 245, 245);
             HBRUSH bgBrush = CreateSolidBrush(bgColor);
             FillRect(hdc, &rc, bgBrush);
             DeleteObject(bgBrush);
 
-            // Top border
             COLORREF borderColor = g_darkMode ? RGB(80, 80, 80) : RGB(200, 200, 200);
             HPEN pen = CreatePen(PS_SOLID, 1, borderColor);
             HPEN oldPen = (HPEN)SelectObject(hdc, pen);
@@ -693,22 +720,20 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             RECT parentRc;
             GetClientRect(GetParent(hwnd), &parentRc);
-            GetButtonLayout(parentRc.right, buttons, btnCount);
+            GetButtonLayout(parentRc.right, Scale(TRACKBAR_WIDTH), buttons, btnCount);
 
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
 
-            // Text colors
             COLORREF textColor = g_darkMode ? RGB(220, 220, 220) : RGB(60, 60, 60);
             COLORREF labelColor = g_darkMode ? RGB(180, 180, 180) : RGB(80, 80, 80);
 
             for (int i = 0; i < btnCount; i++) {
-                RECT btnRc = {buttons[i].x, 8, buttons[i].x + buttons[i].width, 8 + BUTTON_HEIGHT};
+                RECT btnRc = {buttons[i].x, Scale(7), buttons[i].x + buttons[i].width, Scale(7) + Scale(BASE_BUTTON_HEIGHT - 8)};
                 bool hovered = (pt.x >= btnRc.left && pt.x < btnRc.right && pt.y >= btnRc.top && pt.y < btnRc.bottom);
                 bool pressed = (pressedBtn == buttons[i].id);
 
-                // Button background
                 COLORREF btnBgColor;
                 if (pressed) btnBgColor = g_darkMode ? RGB(70, 70, 70) : RGB(200, 200, 200);
                 else if (hovered) btnBgColor = g_darkMode ? RGB(60, 60, 60) : RGB(230, 230, 230);
@@ -718,7 +743,6 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 FillRect(hdc, &btnRc, brush);
                 DeleteObject(brush);
 
-                // Border
                 if (hovered || pressed) {
                     COLORREF btnBorderColor = g_darkMode ? RGB(100, 100, 100) : RGB(180, 180, 180);
                     HPEN borderPen = CreatePen(PS_SOLID, 1, btnBorderColor);
@@ -730,36 +754,33 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     DeleteObject(borderPen);
                 }
 
-                // Separator
                 if (i == 1 || i == 5 || i == 7) {
-                    int sepX = btnRc.right + 10;
+                    int sepX = btnRc.right + Scale(10);
                     COLORREF sepPenColor = g_darkMode ? RGB(80, 80, 80) : RGB(200, 200, 200);
                     HPEN sepPen = CreatePen(PS_SOLID, 1, sepPenColor);
                     HPEN oldSepPen = (HPEN)SelectObject(hdc, sepPen);
-                    MoveToEx(hdc, sepX, 14, nullptr);
-                    LineTo(hdc, sepX, TOOLBAR_HEIGHT - 14);
+                    MoveToEx(hdc, sepX, Scale(14), nullptr);
+                    LineTo(hdc, sepX, Scale(BASE_TOOLBAR_HEIGHT - 14));
                     SelectObject(hdc, oldSepPen);
                     DeleteObject(sepPen);
                 }
 
-                // Symbol
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, textColor);
-                HFONT symbolFont = CreateFontW(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
+                HFONT symbolFont = CreateFontW(Scale(32), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
                 HFONT oldFont = (HFONT)SelectObject(hdc, symbolFont);
 
-                RECT symbolRect = {btnRc.left, btnRc.top + 3, btnRc.right, btnRc.top + 28};
+                RECT symbolRect = {btnRc.left, btnRc.top + Scale(2), btnRc.right, btnRc.top + Scale(30)};
                 DrawTextW(hdc, buttons[i].symbol, -1, &symbolRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(hdc, oldFont);
                 DeleteObject(symbolFont);
 
-                // Label
                 SetTextColor(hdc, labelColor);
-                HFONT labelFont = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                HFONT labelFont = CreateFontW(Scale(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
                 oldFont = (HFONT)SelectObject(hdc, labelFont);
 
-                RECT labelRect = {btnRc.left, btnRc.top + 26, btnRc.right, btnRc.bottom - 3};
+                RECT labelRect = {btnRc.left, btnRc.top + Scale(28), btnRc.right, btnRc.bottom - Scale(3)};
                 DrawTextW(hdc, buttons[i].label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(hdc, oldFont);
@@ -776,7 +797,7 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             int newHover = -1;
             for (int i = 0; i < btnCount; i++) {
-                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && y >= 8 && y < 8 + BUTTON_HEIGHT) {
+                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && y >= Scale(7) && y < Scale(7) + Scale(BASE_BUTTON_HEIGHT - 8)) {
                     newHover = buttons[i].id;
                     break;
                 }
@@ -794,7 +815,7 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int y = HIWORD(lParam);
 
             for (int i = 0; i < btnCount; i++) {
-                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && y >= 8 && y < 8 + BUTTON_HEIGHT) {
+                if (x >= buttons[i].x && x < buttons[i].x + buttons[i].width && y >= Scale(7) && y < Scale(7) + Scale(BASE_BUTTON_HEIGHT - 8)) {
                     pressedBtn = buttons[i].id;
                     InvalidateRect(hwnd, nullptr, FALSE);
                     break;
@@ -820,7 +841,7 @@ LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_SIZE:
             RECT parentRc;
             GetClientRect(GetParent(hwnd), &parentRc);
-            GetButtonLayout(parentRc.right, buttons, btnCount);
+            GetButtonLayout(parentRc.right, Scale(TRACKBAR_WIDTH), buttons, btnCount);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
     }
@@ -834,13 +855,12 @@ void Render(HWND hwnd) {
     RECT clientRect;
     GetClientRect(hwnd, &clientRect);
     int width = clientRect.right;
-    int height = clientRect.bottom - TOOLBAR_HEIGHT;
+    int height = clientRect.bottom - Scale(BASE_TOOLBAR_HEIGHT);
 
     HDC memDC = CreateCompatibleDC(hdc);
     HBITMAP memBitmap = CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, memBitmap);
 
-    // Dark or light background
     Color bgColor = g_darkMode ? Color(30, 30, 30) : Color(240, 240, 240);
     Graphics graphics(memDC);
     graphics.Clear(bgColor);
@@ -856,8 +876,8 @@ void Render(HWND hwnd) {
         float drawWidth, drawHeight, x, y;
 
         if (g_fitToWindow) {
-            float scaleX = (float)(width - 20) / renderWidth;
-            float scaleY = (float)(height - 20) / renderHeight;
+            float scaleX = (float)(width - Scale(20)) / renderWidth;
+            float scaleY = (float)(height - Scale(20)) / renderHeight;
             float scale = (std::min)(scaleX, scaleY);
             drawWidth = renderWidth * scale;
             drawHeight = renderHeight * scale;
@@ -887,7 +907,7 @@ void Render(HWND hwnd) {
     } else {
         SetBkMode(memDC, TRANSPARENT);
         SetTextColor(memDC, g_darkMode ? RGB(200, 200, 200) : RGB(100, 100, 100));
-        HFONT font = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT font = CreateFontW(Scale(16), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT oldFont = (HFONT)SelectObject(memDC, font);
         std::wstring msg = g_imageFiles.empty() ? L"Drag and drop an image here" : L"Failed to load image";
         RECT textRect = {0, 0, width, height};
@@ -909,7 +929,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_CREATE: {
             DragAcceptFiles(hwnd, TRUE);
 
-            // Create menu bar
             g_hMenu = CreateMenu();
             HMENU hOptionsMenu = CreatePopupMenu();
 
@@ -920,7 +939,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             AppendMenuW(g_hMenu, MF_POPUP, (UINT_PTR)hOptionsMenu, L"Options");
             SetMenu(hwnd, g_hMenu);
 
-            // Register toolbar class
             WNDCLASSEXW wc = {};
             wc.cbSize = sizeof(WNDCLASSEXW);
             wc.lpfnWndProc = ToolbarWndProc;
@@ -930,17 +948,36 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
             RegisterClassExW(&wc);
 
-            // Create toolbar
             RECT rc;
             GetClientRect(hwnd, &rc);
             g_hToolbar = CreateWindowExW(0, L"wpicToolbar", nullptr,
                 WS_CHILD | WS_VISIBLE,
-                0, rc.bottom - TOOLBAR_HEIGHT, rc.right, TOOLBAR_HEIGHT,
+                0, rc.bottom - Scale(BASE_TOOLBAR_HEIGHT), rc.right, Scale(BASE_TOOLBAR_HEIGHT),
                 hwnd, nullptr, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
 
-            // Initialize cache (don't start thread yet)
+            g_hTrackbar = CreateWindowExW(0, TRACKBAR_CLASSW, nullptr,
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS | TBS_TOOLTIPS,
+                0, 0, 0, 0,
+                g_hToolbar, (HMENU)1010, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
+            SendMessageW(g_hTrackbar, TBM_SETRANGE, TRUE, MAKELPARAM(10, 1000));
+            SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, 100);
+
             InitCache();
 
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            g_dpi = HIWORD(wParam);
+            g_dpiScale = g_dpi / 96.0f;
+            RECT* prcNew = (RECT*)lParam;
+            SetWindowPos(hwnd, NULL, prcNew->left, prcNew->top,
+                prcNew->right - prcNew->left,
+                prcNew->bottom - prcNew->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+            
+            SendMessage(hwnd, WM_SIZE, 0, 0);
+            InvalidateRect(hwnd, nullptr, TRUE);
             return 0;
         }
 
@@ -956,8 +993,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             StopCacheThread();
             ScanFolder(filePath);
             ClearCache();
-            WakeCacheThread();  // Signal cache that image list is ready
-            StartCacheThread(); // Start cache thread after image list is populated
+            WakeCacheThread();
+            StartCacheThread();
             LoadImage(g_currentIndex);
             return 0;
         }
@@ -970,9 +1007,30 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (g_hToolbar) {
                 RECT rc;
                 GetClientRect(hwnd, &rc);
-                SetWindowPos(g_hToolbar, nullptr, 0, rc.bottom - TOOLBAR_HEIGHT, rc.right, TOOLBAR_HEIGHT, SWP_NOZORDER);
+                int toolbarHeight = Scale(BASE_TOOLBAR_HEIGHT);
+                SetWindowPos(g_hToolbar, nullptr, 0, rc.bottom - toolbarHeight, rc.right, toolbarHeight, SWP_NOZORDER);
+                
+                if (g_hTrackbar) {
+                    int trackbarWidth = Scale(TRACKBAR_WIDTH);
+                    int trackbarHeight = Scale(20);
+                    int margin = Scale(10);
+                    SetWindowPos(g_hTrackbar, nullptr, 
+                        rc.right - trackbarWidth - margin, 
+                        (toolbarHeight - trackbarHeight) / 2,
+                        trackbarWidth, trackbarHeight, SWP_NOZORDER);
+                }
             }
             InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+
+        case WM_HSCROLL: {
+            if ((HWND)lParam == g_hTrackbar) {
+                int pos = (int)SendMessageW(g_hTrackbar, TBM_GETPOS, 0, 0);
+                g_zoom = pos / 100.0f;
+                g_fitToWindow = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
 
@@ -1063,16 +1121,44 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLineAnsi, int nCmd
     ULONG_PTR gdiplusToken;
     GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
-    // Convert ANSI command line to wide char to maintain compatibility with existing code
+    // Set DPI awareness
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        SetProcessDpiAwarenessContextFunc SetProcessDpiAwarenessContext = 
+            (SetProcessDpiAwarenessContextFunc)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        
+        if (SetProcessDpiAwarenessContext) {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        } else {
+            SetProcessDPIAwareFunc SetProcessDPIAware = 
+                (SetProcessDPIAwareFunc)GetProcAddress(hUser32, "SetProcessDPIAware");
+            if (SetProcessDPIAware) {
+                SetProcessDPIAware();
+            }
+        }
+        
+        GetDpiForSystemFunc GetDpiForSystem = 
+            (GetDpiForSystemFunc)GetProcAddress(hUser32, "GetDpiForSystem");
+        if (GetDpiForSystem) {
+            g_dpi = GetDpiForSystem();
+            g_dpiScale = g_dpi / 96.0f;
+        }
+    }
+
+    // Initialize common controls (required for trackbar)
+    INITCOMMONCONTROLSEX iccex;
+    iccex.dwSize = sizeof(iccex);
+    iccex.dwICC = ICC_BAR_CLASSES;
+    InitCommonControlsEx(&iccex);
+
     int wideLen = MultiByteToWideChar(CP_ACP, 0, lpCmdLineAnsi, -1, nullptr, 0);
     std::vector<wchar_t> wideBuffer(wideLen);
     MultiByteToWideChar(CP_ACP, 0, lpCmdLineAnsi, -1, wideBuffer.data(), wideLen);
     LPWSTR lpCmdLine = wideBuffer.data();
 
-    // Load icon
     HICON hIcon = LoadIconW(hInstance, L"IDI_APPLICATION");
     if (!hIcon) hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(101));
-    if (!hIcon) hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512)); // IDI_APPLICATION = 32512
+    if (!hIcon) hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
 
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(WNDCLASSEXW);
@@ -1090,7 +1176,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLineAnsi, int nCmd
         L"wpicWindowClass",
         L"wpic",
         WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700,
+        CW_USEDEFAULT, CW_USEDEFAULT, Scale(1000), Scale(700),
         nullptr, nullptr, hInstance, nullptr
     );
 
@@ -1100,7 +1186,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLineAnsi, int nCmd
             cmdLine = cmdLine.substr(1, cmdLine.length() - 2);
         }
         ScanFolder(cmdLine);
-        // Load the specific image that was requested, not index 0
         WakeCacheThread();
         StartCacheThread();
         LoadImage(g_currentIndex);
