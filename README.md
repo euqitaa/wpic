@@ -1,110 +1,77 @@
-# wpic
+# wpic — Lightweight Windows Image Viewer
 
-A minimal, lightweight image viewer for Windows. Built with pure Win32 API and GDI+ - no bloat.
+> A tiny, instant image viewer for Windows. No bloat, no telemetry, no dependencies. Just open and view.
 
-![wpic Icon](wpic.png)
+![wpic screenshot](Screenshot.png)
 
-## Features
-
-- **Minimal footprint**: ~50KB executable, ~5-10MB RAM usage
-- **Fast loading**: Native Win32 + GDI+ rendering
-- **Clean UI**: Standard Windows title bar with bottom toolbar
-- **Folder navigation**: Auto-scans folder for images
-- **Keyboard shortcuts**:
-  - `←` / `→` or `Space` / `Backspace` - Navigate images
-  - `↑` / `↓` - Zoom in/out
-  - `F` - Toggle fit-to-window
-  - `R` - Reset rotation
-  - `Delete` - Move to Recycle Bin (with confirmation)
-  - `Esc` - Exit
-- **Mouse controls**:
-  - Scroll wheel - Zoom
-  - Drag - Pan when zoomed
-  - Drag & drop - Open image
-- **Supported formats**: JPG, PNG, GIF, BMP, TIFF, WebP
-- **Safe delete**: Files moved to Recycle Bin with confirmation dialog
-- **Image rotation**: Rotate left/right without distortion
-
-## Screenshots
-![Screenshot](Screenshot.png)
-### Main Interface
-Standard Windows title bar with centered toolbar at bottom:
-```
-[◄ Previous] [► Next] | [⊖ Zoom out] [⊕ Zoom in] [□ Fit] [1:1 Actual] | [↺ Rotate left] [↻ Rotate right] | [✕ Delete]
-```
-
-## Building
-
-### Prerequisites
-
-- **MinGW-w64** (recommended) or **Visual Studio Build Tools**
-- Your icon file: `wpic.ico` (convert the provided PNG to ICO format)
-
-### Build Steps
-
-1. **Convert icon** (if you have PNG):
-   - Use any online PNG to ICO converter
-   - Recommended size: 256x256 with 32x32 and 16x16 versions included
-   - Save as `wpic.ico`
-
-2. **Compile resource file**:
-   ```bash
-   windres wpic.rc -o wpic_res.o
-   ```
-
-3. **Build executable**:
-   ```bash
-   g++ -O2 -s wpic.cpp wpic_res.o -o wpic.exe -mwindows -static -lgdiplus -luser32 -lgdi32 -lshell32 -fexceptions
-   ```
-
-### MSVC Alternative
-
-```cmd
-rc.exe wpic.rc
-cl.exe wpic.cpp /O2 /Fe:wpic.exe /link wpic.res gdiplus.lib user32.lib gdi32.lib shell32.lib
-```
-
-## Installation
-
-Simply place `wpic.exe` anywhere you want. It's a portable single-file application.
-
-Optional: Set as default image viewer:
-1. Right-click an image file → Open with → Choose another app
-2. Browse to `wpic.exe`
-3. Check "Always use this app to open .jpg files" (repeat for other formats)
-
-## Usage
-
-```cmd
-wpic.exe [image_path]
-```
-
-Or drag and drop an image onto the window.
+---
 
 ## Why wpic?
 
-| Feature | Microsoft Photos | wpic |
-|---------|-----------------|------|
-| Startup Time | Slow (UWP) | Instant |
-| RAM Usage | ~100-200MB | ~5-10MB |
-| File Size | ~50MB+ | ~50KB |
-| Dependencies | Windows Store, UWP | Windows only |
-| Network Calls | Yes (OneDrive) | No |
-| Telemetry | Yes | No |
+Most image viewers on Windows are slow, heavy, or phone-home to the cloud. wpic is ~50KB, loads instantly, and does one thing well.
 
-## Architecture
+| | Microsoft Photos | wpic |
+|---|---|---|
+| Startup | Slow (UWP) | **Instant** |
+| RAM | ~150MB | **~8MB** |
+| Size | ~50MB | **~50KB** |
+| Telemetry | Yes | **No** |
+| Internet | Yes (OneDrive) | **No** |
 
-- **No frameworks**: Pure Win32 API + GDI+
-- **No runtime dependencies**: Uses only Windows system libraries
-- **Static linking**: Single executable file
-- **Memory efficient**: Loads only current image
+---
 
-## Files
+## Features
 
-- `wpic.cpp` - Main source code
-- `wpic.rc` - Resource file (icon + version info)
-- `wpic.ico` - Application icon (you provide this)
+- 🖼 **Folder navigation** — browse all images in a folder with arrow keys or buttons
+- 🔍 **Zoom & pan** — scroll wheel to zoom toward cursor, drag to pan
+- 🔄 **Rotation** — rotate images left/right
+- 🗑 **Safe delete** — sends to Recycle Bin with confirmation
+- 🌙 **Dark mode** — toggle via Options menu or `Ctrl+D`
+- 📁 **Drag & drop** — drop any image to open it
+- **Formats**: JPG, PNG, GIF, BMP, TIFF, WebP
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `←` `→` or `Space` / `Backspace` | Previous / Next image |
+| `↑` `↓` | Zoom in / out |
+| `F` | Toggle fit-to-window |
+| `R` | Reset rotation |
+| `Delete` | Move to Recycle Bin |
+| `Esc` | Exit |
+
+---
+
+## Building from Source
+
+**Requirements:** MinGW-w64
+
+```bash
+# 1. Compile resources
+windres wpic.rc -o wpic_res.o
+
+# 2. Build
+g++ -O2 -s wpic.cpp wpic_res.o -o wpic.exe -mwindows -static \
+    -lgdiplus -luser32 -lgdi32 -lshell32 -lcomctl32 -lshlwapi -lole32 -fexceptions
+```
+
+The result is a single portable `.exe` — no installer needed.
+
+---
+
+## Usage
+
+```bash
+wpic.exe path\to\image.jpg
+```
+
+Or drag and drop an image onto the window. wpic auto-scans the image's folder so you can navigate all images in that directory.
+
+---
 
 ## License
 
-Public Domain - Do whatever you want.
+[MIT](LICENSE) — free to use, modify, and distribute.
