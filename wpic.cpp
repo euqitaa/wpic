@@ -644,7 +644,7 @@ LRESULT CALLBACK AboutDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                 0, Scale(20), Scale(400), Scale(40), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)CreateFontW(Scale(24), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
 
-            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 1.0",
+            HWND hVersion = CreateWindowExW(0, L"STATIC", L"Version 0.5.3",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 0, Scale(65), Scale(400), Scale(25), hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
             SendMessageW(hVersion, WM_SETFONT, (WPARAM)CreateFontW(Scale(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI"), TRUE);
