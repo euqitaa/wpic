@@ -74,4 +74,4 @@ Or drag and drop an image onto the window. wpic auto-scans the image's folder so
 
 ## License
 
-[MIT](LICENSE) — free to use, modify, and distribute.
+Free to use, modify, and distribute.
