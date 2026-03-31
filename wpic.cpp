@@ -22,6 +22,7 @@
 
 #include <gdiplus.h>
 #include <windowsx.h>
+#include <math.h>
 #include <vector>
 #include <string>
 #include <algorithm>
@@ -65,14 +66,32 @@ typedef BOOL (WINAPI *SetProcessDPIAwareFunc)(void);
 #define IDM_OPTIONS_ABOUT 2002
 
 // DPI Scale aware constants - INCREASED for better usability
-#define BASE_TOOLBAR_HEIGHT 64
-#define BASE_BUTTON_HEIGHT 48
+#define BASE_TOOLBAR_HEIGHT 72
+#define BASE_BUTTON_HEIGHT 56
 #define TRACKBAR_WIDTH 160
-#define TRACKBAR_HEIGHT 20
-#define STATUS_BAR_HEIGHT 22
+#define TRACKBAR_HEIGHT 22
+#define STATUS_BAR_HEIGHT 26
 #define ZOOM_LABEL_WIDTH 52
 
-// Button IDs
+// Trackbar uses 0..100 internal units with log scale:
+//   pos=0  → 10% zoom,  pos=50 → 100% zoom,  pos=100 → 1000% zoom
+#define TRACKBAR_UNITS 100
+
+static inline int ZoomToTrackPos(float zoom) {
+    // zoom range: 0.1 .. 10.0  →  pos range: 0 .. 100
+    // log10(zoom) range: -1 .. 1  →  map to 0..100
+    float logZ = log10f((std::max)(zoom, 0.01f));
+    int pos = (int)((logZ + 1.0f) * 50.0f + 0.5f);
+    if (pos < 0) pos = 0;
+    if (pos > TRACKBAR_UNITS) pos = TRACKBAR_UNITS;
+    return pos;
+}
+
+static inline float TrackPosToZoom(int pos) {
+    // inverse: pos 0..100 → zoom 0.1..10
+    float logZ = pos / 50.0f - 1.0f;
+    return powf(10.0f, logZ);
+}
 #define ID_BTN_PREV 1001
 #define ID_BTN_NEXT 1002
 #define ID_BTN_ZOOM_OUT 1003
@@ -424,9 +443,7 @@ void UpdateTitle() {
 
 void UpdateTrackbarPos() {
     if (g_hTrackbar) {
-        int pos = (int)(g_zoom * 100);
-        if (pos < 10) pos = 10;
-        if (pos > 1000) pos = 1000;
+        int pos = ZoomToTrackPos(g_zoom);
         SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, pos);
     }
     if (g_hZoomLabel) {
@@ -785,7 +802,7 @@ LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             COLORREF textColor = g_darkMode ? RGB(225, 225, 230) : RGB(45, 45, 55);
             COLORREF labelColor = g_darkMode ? RGB(140, 140, 150) : RGB(110, 110, 120);
 
-            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 10);
+            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 6);
             int btnTop = (rc.bottom - btnHeight) / 2;
 
             for (int i = 0; i < btnCount; i++) {
@@ -845,12 +862,12 @@ LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     ? (g_darkMode ? RGB(255, 100, 100) : RGB(200, 50, 50))
                     : textColor;
                 SetTextColor(hdc, symColor);
-                HFONT symbolFont = CreateFontW(Scale(18), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                HFONT symbolFont = CreateFontW(-Scale(20), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Symbol");
                 HFONT oldFont = (HFONT)SelectObject(hdc, symbolFont);
 
-                RECT symbolRect = {btnRc.left, btnRc.top + Scale(2), btnRc.right, btnRc.top + Scale(22)};
+                RECT symbolRect = {btnRc.left, btnRc.top + Scale(4), btnRc.right, btnRc.top + Scale(28)};
                 DrawTextW(hdc, buttons[i].symbol, -1, &symbolRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(hdc, oldFont);
@@ -858,12 +875,12 @@ LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
                 // Label
                 SetTextColor(hdc, labelColor);
-                HFONT labelFont = CreateFontW(Scale(9), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                HFONT labelFont = CreateFontW(-Scale(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
                 oldFont = (HFONT)SelectObject(hdc, labelFont);
 
-                RECT labelRect = {btnRc.left, btnRc.top + Scale(20), btnRc.right, btnRc.bottom - Scale(1)};
+                RECT labelRect = {btnRc.left, btnRc.top + Scale(26), btnRc.right, btnRc.bottom - Scale(2)};
                 DrawTextW(hdc, buttons[i].label, -1, &labelRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                 SelectObject(hdc, oldFont);
@@ -878,7 +895,7 @@ LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
 
-            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 10);
+            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 6);
             int btnTop = (Scale(BASE_TOOLBAR_HEIGHT) - btnHeight) / 2;
 
             int newHover = -1;
@@ -901,7 +918,7 @@ LRESULT CALLBACK ToolbarParentWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
 
-            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 10);
+            int btnHeight = Scale(BASE_BUTTON_HEIGHT - 6);
             int btnTop = (Scale(BASE_TOOLBAR_HEIGHT) - btnHeight) / 2;
 
             for (int i = 0; i < btnCount; i++) {
@@ -1084,8 +1101,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 Scale(TRACKBAR_HEIGHT),
                 hwnd, (HMENU)1010, ((LPCREATESTRUCT)lParam)->hInstance, nullptr);
             
-            SendMessageW(g_hTrackbar, TBM_SETRANGE, TRUE, MAKELPARAM(10, 1000));
-            SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, 100);
+            SendMessageW(g_hTrackbar, TBM_SETRANGE, TRUE, MAKELPARAM(0, TRACKBAR_UNITS));
+            SendMessageW(g_hTrackbar, TBM_SETPOS, TRUE, ZoomToTrackPos(1.0f));  // 50 = 100%
             // Subclass trackbar to forward mousewheel to main window
             g_origTrackbarProc = (WNDPROC)SetWindowLongPtrW(g_hTrackbar, GWLP_WNDPROC, (LONG_PTR)TrackbarSubclassProc);
 
@@ -1099,12 +1116,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
             InitCache();
 
-            // Set fonts on static controls
-            HFONT hStatusFont = CreateFontW(Scale(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            // Set fonts on static controls — use larger readable sizes
+            HFONT hStatusFont = CreateFontW(-Scale(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             if (g_hStatusBar) SendMessageW(g_hStatusBar, WM_SETFONT, (WPARAM)hStatusFont, TRUE);
-            HFONT hZoomFont = CreateFontW(Scale(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            HFONT hZoomFont = CreateFontW(-Scale(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             if (g_hZoomLabel) SendMessageW(g_hZoomLabel, WM_SETFONT, (WPARAM)hZoomFont, TRUE);
@@ -1183,12 +1200,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_HSCROLL: {
             if ((HWND)lParam == g_hTrackbar) {
                 int pos = (int)SendMessageW(g_hTrackbar, TBM_GETPOS, 0, 0);
-                g_zoom = pos / 100.0f;
+                g_zoom = TrackPosToZoom(pos);
+                if (g_zoom < 0.01f) g_zoom = 0.01f;
+                if (g_zoom > 10.0f) g_zoom = 10.0f;
                 g_fitToWindow = false;
                 // Update zoom label
                 if (g_hZoomLabel) {
                     wchar_t buf[16];
-                    wsprintfW(buf, L"%d%%", pos);
+                    int pct = (int)(g_zoom * 100 + 0.5f);
+                    wsprintfW(buf, L"%d%%", pct);
                     SetWindowTextW(g_hZoomLabel, buf);
                 }
                 UpdateStatusBar();
